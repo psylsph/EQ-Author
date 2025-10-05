@@ -1,0 +1,9 @@
+.venv
+.prompt_cache
+__pycache__/
+*.ttf
+.env
+GEMINI.md
+AGENTS.md
+package-lock.json
+outputs
