@@ -24,9 +24,9 @@ STEP_FILENAMES = {
     5: "05_characters.md",
 }
 
-CHAPTER_WORD_TARGET = 3000
+CHAPTER_WORD_TARGET = 2500
 CHAPTER_MIN_WORDS = CHAPTER_WORD_TARGET
-CHAPTER_MAX_ATTEMPTS = 3
+CHAPTER_MAX_ATTEMPTS = 5
 
 WORD_RE = re.compile(r"\b[\w'\-]+\b")
 
@@ -36,13 +36,23 @@ DEFAULT_SUMMARY_LENGTH = 250
 DEFAULT_RECENT_CHAPTERS = 2
 CONTEXT_WARNING_THRESHOLD = 0.8
 CONTEXT_CRITICAL_THRESHOLD = 0.95
+UNLIMITED_STRATEGY = "unlimited"
+
+# Model-specific context limits
+DEFAULT_MAX_CONTEXT_TOKENS = 8000  # Default for most models
+DEEPSEEK_REASONER_MAX_TOKENS = 128000  # Max for deepseek-reasoner
+DEEPSEEK_REASONER_DEFAULT_TOKENS = 32000  # Default for deepseek-reasoner
+
+# Model-specific temperature defaults
+DEFAULT_TEMPERATURE = 1.0  # Default for most models
+DEEPSEEK_REASONER_TEMPERATURE = 1.0  # Default for deepseek-reasoner
 
 
 class ContextManager:
     """Manages conversation context to prevent overflow in limited-context models."""
     
     def __init__(self, strategy: str = DEFAULT_CONTEXT_STRATEGY, summary_length: int = DEFAULT_SUMMARY_LENGTH,
-                 recent_chapters: int = DEFAULT_RECENT_CHAPTERS, max_context_tokens: int = 8000):
+                 recent_chapters: int = DEFAULT_RECENT_CHAPTERS, max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS):
         self.strategy = strategy
         self.summary_length = summary_length
         self.recent_chapters = recent_chapters
@@ -58,12 +68,13 @@ class ContextManager:
         """Add core planning context that should always be preserved."""
         self.core_context = messages.copy()
         
-    def add_chapter(self, chapter_num: int, chapter_text: str, summary: str) -> None:
+    def add_chapter(self, chapter_num: int, chapter_text: str, summary: str, ending: str = "") -> None:
         """Add a new chapter and its summary to the context manager."""
         self.chapter_summaries.append({
             "chapter": chapter_num,
             "summary": summary,
-            "full_text": chapter_text if self.strategy == "full" else None
+            "ending": ending,
+            "full_text": chapter_text if self.strategy in ["full", "unlimited"] else None
         })
         
         # Keep recent full chapters if strategy allows
@@ -115,12 +126,27 @@ class ContextManager:
                     "role": "assistant",
                     "content": f"Chapter {summary_info['chapter']} Full Text:\n{summary_info['full_text']}"
                 })
+                
+        elif self.strategy == "unlimited":
+            # Include all full chapters without any summarization or limits
+            for summary_info in self.chapter_summaries:
+                context.append({
+                    "role": "assistant",
+                    "content": f"Chapter {summary_info['chapter']} Full Text:\n{summary_info['full_text']}"
+                })
         
         return context
     
     def estimate_tokens(self, text: str) -> int:
         """Rough estimate of token count (approximately 4 characters per token)."""
         return len(text) // 4
+    
+    def get_previous_chapter_ending(self, current_chapter: int) -> str:
+        """Get the ending text of the previous chapter."""
+        for summary_info in reversed(self.chapter_summaries):
+            if summary_info["chapter"] == current_chapter - 1:
+                return summary_info.get("ending", "")
+        return ""
     
     def check_context_size(self, messages: List[Dict[str, str]]) -> Dict[str, Any]:
         """Check if context is approaching limits and return status."""
@@ -177,6 +203,14 @@ def count_words(text: str) -> int:
     if not text:
         return 0
     return len(WORD_RE.findall(text))
+
+
+def extract_chapter_ending(chapter_text: str, max_sentences: int = 2) -> str:
+    """Extract the last 1-2 sentences from a chapter to track the ending."""
+    sentences = re.split(r'(?<=[.!?])\s+', chapter_text.strip())
+    if len(sentences) <= max_sentences:
+        return chapter_text.strip()
+    return ' '.join(sentences[-max_sentences:]).strip()
 
 
 class PromptCache:
@@ -273,14 +307,14 @@ def build_followup_prompts(n_chapters: int) -> List[str]:
     )
 
     p4 = (
-        "Ok now with these considerations in mind, formulate the final plan for the a human like, compelling short piece in {n_chapters} chapters. Bear in mind the constraints of the piece (each chapter is just 3000 words). "
+        "Ok now with these considerations in mind, formulate the final plan for the a human like, compelling short piece in {n_chapters} chapters. Bear in mind the constraints of the piece (each chapter is just {word_target} words). "
         "Above all things, the plan must serve the original prompt. We will use the same format as before:\n"
         "# Intention\n"
         "<State your formulated intentions for the piece, synthesised from the the parts of the brainstorming session that worked, and avoiding the parts that didn't. "
         "Be explicit about the choices you have made about plot, voice, stylistic choices, things you intend to aim for & avoid.>\n"
         "# Chapter Planning\n"
         "<Write a brief chapter plan for all {n_chapters} chapters.>"
-    ).format(n_chapters=n_chapters)
+    ).format(n_chapters=n_chapters, word_target=CHAPTER_WORD_TARGET)
 
     p5 = (
         "Perfect. Now with the outline more crystallised, and bearing in mind the discussion on human writing vs LLM pitfalls, we will flesh out our characters. Lets go through each of our main characters:\n"
@@ -343,19 +377,37 @@ def collect_feedback(step_label: Any) -> str:
         return ""
 
 
-def chapter_prompt(i: int) -> str:
+def chapter_prompt(i: int, previous_chapter_ending: Optional[str] = None) -> str:
     base_intro = (
         f"Write Chapter {i} of the story, following the approved plan and prior chapters.\n"
         f"- Produce at least {CHAPTER_MIN_WORDS} words of narrative prose.\n"
         "- Count only the words in your final story text; do not include planning notes or analysis.\n"
-        "- Output only the polished chapter text (you may open with a 'Chapter {i}' heading if that matches the style), and do not mention the word count or include any commentary."
+        "- Output only the polished chapter text (you may open with a 'Chapter {i}' heading if that matches the style), and do not mention the word count or include any commentary.\n"
     )
+    
     if i == 1:
         return (
             "Great. Let's begin the story.\n" + base_intro
         )
+    
+    # For subsequent chapters, add explicit instructions to avoid overlap
+    overlap_instructions = (
+        "\nIMPORTANT: Begin this chapter at a natural point after the previous chapter ended.\n"
+        "- DO NOT repeat or restate events that just occurred at the end of the previous chapter.\n"
+        "- Assume the reader has just finished the previous chapter and start with new content.\n"
+        "- If referencing the previous chapter's ending, do so subtly without retelling the events.\n"
+        "- Create a clear boundary between chapters - each chapter should feel distinct.\n"
+        "- Think of this as a TV show episode that picks up after the previous one ended, not by replaying the last scene.\n"
+    )
+    
+    if previous_chapter_ending:
+        overlap_instructions += (
+            f"\nNOTE: The previous chapter ended with: {previous_chapter_ending}\n"
+            f"Start this chapter AFTER this moment, not by repeating it."
+        )
+    
     return (
-        f"Continue with the next installment.\n" + base_intro
+        f"Continue with the next installment.\n" + base_intro + overlap_instructions
     )
 
 
@@ -483,6 +535,20 @@ def chat_once(
     return result
 
 
+def get_default_max_context_tokens(model: str) -> int:
+    """Return the appropriate default max_context_tokens based on the model."""
+    if model.lower() == "deepseek-reasoner":
+        return DEEPSEEK_REASONER_DEFAULT_TOKENS
+    return DEFAULT_MAX_CONTEXT_TOKENS
+
+
+def get_default_temperature(model: str) -> float:
+    """Return the appropriate default temperature based on the model."""
+    if model.lower() == "deepseek-reasoner":
+        return DEEPSEEK_REASONER_TEMPERATURE
+    return DEFAULT_TEMPERATURE
+
+
 def run_workflow_v2(
     api_key: str,
     base_url: str,
@@ -500,7 +566,8 @@ def run_workflow_v2(
     context_strategy: str = DEFAULT_CONTEXT_STRATEGY,
     summary_length: int = DEFAULT_SUMMARY_LENGTH,
     recent_chapters: int = DEFAULT_RECENT_CHAPTERS,
-    max_context_tokens: int = 8000,
+    max_context_tokens: Optional[int] = None,
+    unlimited_context: bool = False,
 ) -> None:
     client = make_client(api_key, base_url)
 
@@ -529,6 +596,15 @@ def run_workflow_v2(
             return collect_feedback(label)
         return ""
 
+    # Use model-specific default if max_context_tokens is not provided
+    if max_context_tokens is None:
+        max_context_tokens = get_default_max_context_tokens(model)
+    
+    # Handle unlimited context flag
+    if unlimited_context:
+        context_strategy = UNLIMITED_STRATEGY
+        max_context_tokens = 2**31 - 1  # Use a very large integer instead of infinity
+    
     # Initialize context manager
     context_manager = ContextManager(
         strategy=context_strategy,
@@ -678,16 +754,20 @@ def run_workflow_v2(
 
     # Chapter writing: chapter 1..N
     for i in range(1, final_count + 1):
+        # Get previous chapter ending for context
+        previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
+        
         # Build context for current chapter
         context_messages = context_manager.build_context(i)
-        context_messages.append({"role": "user", "content": chapter_prompt(i)})
+        context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
         
-        # Check context size
-        context_status = context_manager.check_context_size(context_messages)
-        if context_status["is_warning"]:
-            print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
-        if context_status["is_critical"]:
-            print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
+        # Check context size (skip for unlimited context)
+        if not unlimited_context:
+            context_status = context_manager.check_context_size(context_messages)
+            if context_status["is_warning"]:
+                print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
+            if context_status["is_critical"]:
+                print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
 
         if stream:
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
@@ -751,19 +831,28 @@ def run_workflow_v2(
 
         write_chapter_output(out_dir, i, final_text)
 
-        # Generate chapter summary for context management
-        if stream:
-            print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-        chapter_summary = generate_chapter_summary(
-            client, model, final_text, i, summary_length, stream, temperature, cache
-        )
+        # Extract chapter ending before adding to context
+        chapter_ending = extract_chapter_ending(final_text)
+
+        # Generate chapter summary for context management (skip for unlimited context)
+        if unlimited_context:
+            # For unlimited context, use the full text as the "summary" to maintain consistency
+            chapter_summary = final_text
+            if stream:
+                print(f"\n=== Unlimited Context Mode: Skipping Chapter {i} Summarization ===", flush=True)
+        else:
+            if stream:
+                print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
+            chapter_summary = generate_chapter_summary(
+                client, model, final_text, i, summary_length, stream, temperature, cache
+            )
+            
+            # Save summary to file for reference
+            summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
+            summary_file.write_text(chapter_summary, encoding="utf-8")
         
-        # Add chapter to context manager
-        context_manager.add_chapter(i, final_text, chapter_summary)
-        
-        # Save summary to file for reference
-        summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
-        summary_file.write_text(chapter_summary, encoding="utf-8")
+        # Add chapter to context manager with ending
+        context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
 
         fb = maybe_collect_feedback(f"chapter {i}")
         if fb:
@@ -782,7 +871,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument("--model", type=str, help="Model name", default="deepseek-reasoner")
     p.add_argument("--stream", action="store_true", help="Stream responses (aggregated in output)", default=True)
     p.add_argument("--no-stream", action="store_true", help="Disable response streaming", default=False)
-    p.add_argument("--temperature", type=float, help="Sampling temperature", default=1.0)
+    p.add_argument("--temperature", type=float, help=f"Sampling temperature (default: model-specific, {DEFAULT_TEMPERATURE} for most models, {DEEPSEEK_REASONER_TEMPERATURE} for deepseek-reasoner)", default=None)
     p.add_argument("--non-interactive", action="store_true", help="Run without feedback prompts and chapter count confirmation")
     p.add_argument("--no-cache", action="store_true", help="Disable prompt caching", default=False)
     p.add_argument(
@@ -793,14 +882,16 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     )
     
     # Context management options
-    p.add_argument("--context-strategy", type=str, choices=["aggressive", "balanced", "full"],
+    p.add_argument("--context-strategy", type=str, choices=["aggressive", "balanced", "full", "unlimited"],
                    default=DEFAULT_CONTEXT_STRATEGY, help="Strategy for managing context window (default: aggressive)")
+    p.add_argument("--unlimited-context", action="store_true",
+                   help="Bypass all context management and keep all full chapters in memory without summarization")
     p.add_argument("--summary-length", type=int, default=DEFAULT_SUMMARY_LENGTH,
                    help=f"Target word count for chapter summaries (default: {DEFAULT_SUMMARY_LENGTH})")
     p.add_argument("--recent-chapters", type=int, default=DEFAULT_RECENT_CHAPTERS,
                    help=f"Number of recent full chapters to keep in context (default: {DEFAULT_RECENT_CHAPTERS})")
-    p.add_argument("--max-context-tokens", type=int, default=8000,
-                   help="Maximum context tokens to maintain (default: 8000)")
+    p.add_argument("--max-context-tokens", type=int, default=None,
+                   help=f"Maximum context tokens to maintain (default: model-specific, {DEFAULT_MAX_CONTEXT_TOKENS} for most models, {DEEPSEEK_REASONER_DEFAULT_TOKENS} for deepseek-reasoner)")
     
     return p.parse_args(argv)
 
@@ -839,6 +930,9 @@ def main(argv: List[str]) -> int:
         # Handle streaming options
         stream_enabled = args.stream and not args.no_stream
         
+        # Use model-specific defaults if not provided
+        temperature = args.temperature if args.temperature is not None else get_default_temperature(args.model)
+        
         run_workflow_v2(
             api_key=api_key,
             base_url=args.base_url,
@@ -848,12 +942,13 @@ def main(argv: List[str]) -> int:
             interactive=not args.non_interactive,
             out_dir=out_dir,
             stream=stream_enabled,
-            temperature=args.temperature,
+            temperature=temperature,
             cache=cache,
             context_strategy=args.context_strategy,
             summary_length=args.summary_length,
             recent_chapters=args.recent_chapters,
             max_context_tokens=args.max_context_tokens,
+            unlimited_context=args.unlimited_context,
         )
     except Exception as e:
         print(f"Error during workflow: {e}", file=sys.stderr)

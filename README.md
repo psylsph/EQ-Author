@@ -5,6 +5,7 @@ A powerful CLI and Streamlit UI that reads a story idea and runs a 7-step planni
 ## Features
 
 - **7-Step Planning Workflow**: Brainstorming, intention setting, chapter planning, character development, and more
+- **Narrative Overlap Prevention**: Intelligent chapter boundary management prevents repetition between chapters
 - **Intelligent Context Management**: Automatically manages conversation context to prevent overflow in limited-context models
 - **Interactive & Non-Interactive Modes**: Run with real-time feedback or fully automated
 - **Streamlit Web UI**: User-friendly browser interface with real-time streaming
@@ -76,6 +77,10 @@ Enable streaming with custom temperature:
 python eq_author.py --story-file idea.txt --n-chapters 6 --stream --temperature 0.8
 ```
 
+Note: Temperature and max_context_tokens defaults are model-specific:
+- deepseek-reasoner: temperature=1.0, max_context_tokens=32000 (default output), max output 64K
+- Other models: temperature=1.0, max_context_tokens=8000
+
 ### Non-Interactive Mode
 
 Run without feedback prompts (ideal for automation):
@@ -98,6 +103,25 @@ python eq_author.py --story-file idea.txt --context-strategy balanced --summary-
 For large-context models (64K+ tokens):
 ```bash
 python eq_author.py --story-file idea.txt --context-strategy full --summary-length 400 --recent-chapters 5 --max-context-tokens 60000
+```
+
+### Optimal Settings for DeepSeek
+
+For DeepSeek models with 128K max context length:
+
+**Recommended (Balanced approach):**
+```bash
+python eq_author.py --story-file idea.txt --context-strategy balanced --max-context-tokens 64000 --model deepseek-reasoner
+```
+
+**Maximum performance (Unlimited context):**
+```bash
+python eq_author.py --story-file idea.txt --unlimited-context --model deepseek-reasoner
+```
+
+For unlimited context (bypass all context management):
+```bash
+python eq_author.py --story-file idea.txt --unlimited-context
 ```
 
 ### Alternative API Providers
@@ -157,31 +181,80 @@ The Streamlit UI provides:
 
 The system includes intelligent context management to handle long stories with limited-context models:
 
+### How Context Strategies Work
+
+The context management system automatically maintains story continuity by tracking previous chapters while managing memory usage. Here's how each strategy works:
+
+#### Summary Length and Recent Chapters
+
+- **Summary Length**: Each chapter summary is approximately 250 words by default (controlled by `--summary-length`)
+- **Recent Chapters**: The system keeps the full text of the most recent chapters (default is 2, controlled by `--recent-chapters`)
+
+For example, with a 10-chapter story using default settings:
+- **Aggressive strategy**: Keeps only summaries of chapters 8-10 (3 × 250 words = ~750 words total)
+- **Balanced strategy**: Keeps summaries of chapters 1-8 (8 × 250 words = 2000 words) + full text of chapters 9-10
+- **Full strategy**: Attempts to keep all chapters in full text (may cause overflow with limited models)
+
 ### Context Strategies
 
 1. **Aggressive** (default): Only keeps summaries of recent chapters
    - Best for: Very limited context models (4K-8K tokens)
    - Memory usage: Lowest
    - Detail level: Summaries only
+   - Example: For a 10-chapter story, keeps only the last 2-3 chapter summaries
 
 2. **Balanced**: Keeps all summaries + full text of recent chapters
    - Best for: Medium context models (16K-32K tokens)
    - Memory usage: Medium
    - Detail level: Full recent chapters + all summaries
+   - Example: For a 10-chapter story, keeps summaries of chapters 1-8 (2000 words) + full text of chapters 9-10
+   - **Recommended for DeepSeek**: Provides good balance of context and performance
 
 3. **Full**: Attempts to keep all chapter text
    - Best for: Large context models (64K+ tokens)
    - Memory usage: Highest
    - Detail level: Everything
+   - Example: For a 10-chapter story, tries to keep all 10 chapters in full text
+
+4. **Unlimited**: Bypasses all context management
+   - Best for: Very large context models (128K+ tokens) or when context limits are not a concern
+   - Memory usage: No limits
+   - Detail level: Everything without summarization
+   - Note: Enabled with --unlimited-context flag
+   - **Optimal for DeepSeek**: Takes full advantage of 128K context window
 
 ### Context Management Options
 
 - `--context-strategy {aggressive,balanced,full}`: Strategy for managing context window
+- `--unlimited-context`: Bypass all context management and keep all full chapters in memory without summarization
 - `--summary-length INTEGER`: Target word count for chapter summaries (default: 250)
+  - Increase for more detailed summaries (e.g., 300-400 for complex stories)
+  - Decrease for shorter summaries (e.g., 150-200 for simpler narratives)
 - `--recent-chapters INTEGER`: Number of recent full chapters to keep (default: 2)
+  - Increase for better continuity (e.g., 3-4 for complex character development)
+  - Decrease to save memory (e.g., 1 for minimal context)
 - `--max-context-tokens INTEGER`: Maximum context tokens to maintain (default: 8000)
 
-The system automatically generates chapter summaries and monitors context usage, providing warnings when approaching limits.
+The system automatically generates chapter summaries and monitors context usage, providing warnings when approaching limits. When using `--unlimited-context`, all chapter summarization is skipped and context warnings are disabled.
+
+## Narrative Overlap Prevention
+
+The system includes intelligent chapter boundary management to prevent narrative overlap between chapters:
+
+### How It Works
+
+1. **Chapter Ending Tracking**: Automatically extracts the last 1-2 sentences of each chapter to track where it ends
+2. **Explicit Instructions**: Provides clear guidance to the AI to avoid repeating content from the previous chapter's ending
+3. **Boundary Creation**: Helps the AI create distinct chapter transitions while maintaining story continuity
+
+### Benefits
+
+- **No More Repetitive Beginnings**: Each chapter starts with new content, not by restating the previous chapter's ending
+- **Smooth Transitions**: Maintains narrative flow without redundancy
+- **Clear Chapter Boundaries**: Each chapter feels distinct and self-contained
+- **Preserved Continuity**: Story context is maintained without repetitive content
+
+This feature works automatically with all context strategies and requires no additional configuration. It's especially useful for longer stories where maintaining distinct chapter boundaries is important for reader engagement.
 
 ## PDF Generation
 
@@ -215,8 +288,9 @@ usage: eq_author.py [-h] [--story-file STORY_FILE] [--story-text STORY_TEXT]
                     [--api-key API_KEY] [--base-url BASE_URL] [--model MODEL]
                     [--stream] [--no-stream] [--temperature TEMPERATURE]
                     [--non-interactive] [--no-cache] [--cache-dir CACHE_DIR]
-                    [--context-strategy {aggressive,balanced,full}]
-                    [--summary-length SUMMARY_LENGTH] [--recent-chapters RECENT_CHAPTERS]
+                    [--context-strategy {aggressive,balanced,full,unlimited}]
+                    [--unlimited-context] [--summary-length SUMMARY_LENGTH]
+                    [--recent-chapters RECENT_CHAPTERS]
                     [--max-context-tokens MAX_CONTEXT_TOKENS]
 
 options:
@@ -240,14 +314,16 @@ options:
   --no-cache            Disable prompt caching
   --cache-dir CACHE_DIR
                         Directory for prompt/response cache (default: .prompt_cache)
-  --context-strategy {aggressive,balanced,full}
+  --context-strategy {aggressive,balanced,full,unlimited}
                         Strategy for managing context window (default: aggressive)
+  --unlimited-context
+                        Bypass all context management and keep all full chapters in memory without summarization
   --summary-length SUMMARY_LENGTH
                         Target word count for chapter summaries (default: 250)
   --recent-chapters RECENT_CHAPTERS
                         Number of recent full chapters to keep in context (default: 2)
   --max-context-tokens MAX_CONTEXT_TOKENS
-                        Maximum context tokens to maintain (default: 8000)
+                        Maximum context tokens to maintain (default: 128000)
 ```
 
 ## Project Structure
@@ -373,3 +449,4 @@ This project is licensed under the terms specified in the LICENSE file.
 - Improved error handling and troubleshooting tips
 - Added prompt caching to reduce API calls
 - Enhanced CLI with more configuration options
+- **Fixed narrative overlap between chapters**: Implemented chapter ending tracking and explicit instructions to prevent repetition at chapter transitions

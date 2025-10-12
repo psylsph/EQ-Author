@@ -7,3 +7,5 @@ GEMINI.md
 AGENTS.md
 package-lock.json
 outputs
+*.md
+*.pdf
