@@ -1,6 +1,6 @@
 # EQ-Author DeepSeek Planner & Writer
 
-A powerful CLI and Streamlit UI that reads a story idea and runs a 7-step planning/writing workflow using the DeepSeek API via the OpenAI Python client. Features intelligent context management for limited-context models and beautiful PDF generation.
+A powerful CLI that reads a story idea and runs a 7-step planning/writing workflow using the DeepSeek API via the OpenAI Python client. Features intelligent context management for limited-context models and beautiful PDF generation.
 
 ## Features
 
@@ -8,7 +8,6 @@ A powerful CLI and Streamlit UI that reads a story idea and runs a 7-step planni
 - **Narrative Overlap Prevention**: Intelligent chapter boundary management prevents repetition between chapters
 - **Intelligent Context Management**: Automatically manages conversation context to prevent overflow in limited-context models
 - **Interactive & Non-Interactive Modes**: Run with real-time feedback or fully automated
-- **Streamlit Web UI**: User-friendly browser interface with real-time streaming
 - **PDF Generation**: Convert your stories to professionally formatted PDFs with custom fonts
 - **Prompt Caching**: Avoid repeat API calls with intelligent response caching
 - **Multi-Model Support**: Works with DeepSeek, OpenRouter, LM Studio, and other OpenAI-compatible APIs
@@ -20,7 +19,6 @@ A powerful CLI and Streamlit UI that reads a story idea and runs a 7-step planni
   - `openai>=1.30.0` - For API communication
   - `python-dotenv>=1.0.1` - For environment variable loading
   - `reportlab>=3.6.0` - For PDF generation
-  - `streamlit>=1.34.0` - For the web UI
 
 ## Installation
 
@@ -153,30 +151,6 @@ Disable caching:
 python eq_author.py --story-file idea.txt --cache-dir ""
 ```
 
-## Streamlit Web UI
-
-Launch the interactive planner in your browser:
-
-```bash
-streamlit run streamlit_app.py
-```
-
-The Streamlit UI provides:
-- **Real-time Streaming**: Watch responses generate live
-- **Step-by-Step Control**: Advance through planning stages at your own pace
-- **Feedback Integration**: Add feedback at any step and apply it
-- **PDF Export**: Generate and download PDFs directly from the UI
-- **Model Selection**: Refresh and select from available models
-- **Configuration Panel**: Adjust all settings from the sidebar
-
-### UI Features
-
-- **Configuration Sidebar**: Set API key, base URL, model, temperature, and streaming options
-- **Story Setup**: Upload files or paste story ideas directly
-- **Planning Steps**: Interactive expandable sections for each planning step
-- **Chapter Management**: View chapters, provide feedback, and track progress
-- **PDF Generation**: Create formatted PDFs with custom titles
-
 ## Context Management
 
 The system includes intelligent context management to handle long stories with limited-context models:
@@ -256,30 +230,6 @@ The system includes intelligent chapter boundary management to prevent narrative
 
 This feature works automatically with all context strategies and requires no additional configuration. It's especially useful for longer stories where maintaining distinct chapter boundaries is important for reader engagement.
 
-## PDF Generation
-
-Convert your stories to professionally formatted PDFs:
-
-### CLI PDF Generation
-
-Generate PDF from a specific chapter:
-```bash
-python publish_to_pdf.py outputs/run-20231001-120000/chapters/chapter_01.md -o story_output/MyStory.pdf -t "My Story"
-```
-
-Generate PDF from all chapters in a directory:
-```bash
-python publish_to_pdf.py outputs/run-20231001-120000/chapters -o story_output/CompleteStory.pdf -t "Complete Story"
-```
-
-### PDF Features
-
-- **Custom Fonts**: Automatically downloads and registers beautiful fonts (Crimson Text, Cinzel)
-- **Professional Layout**: Proper margins, spacing, and typography
-- **Chapter Detection**: Automatically identifies chapters from Markdown files
-- **Background Colors**: Eye-friendly paper-like background
-- **Markdown Support**: Handles headings, lists, blockquotes, and code blocks
-
 ## Command-Line Options
 
 ```
@@ -331,7 +281,6 @@ options:
 ```
 EQ-Author/
 ├── eq_author.py          # Main CLI application
-├── streamlit_app.py      # Streamlit web interface
 ├── publish_to_pdf.py     # PDF generation utilities
 ├── requirements.txt      # Python dependencies
 ├── README.md            # This file
@@ -444,9 +393,32 @@ This project is licensed under the terms specified in the LICENSE file.
 - Added intelligent context management for limited-context models
 - Implemented automatic chapter summary generation
 - Added PDF generation with custom fonts and professional layout
-- Enhanced Streamlit UI with real-time streaming and feedback integration
 - Added support for multiple API providers (OpenRouter, LM Studio, etc.)
 - Improved error handling and troubleshooting tips
 - Added prompt caching to reduce API calls
 - Enhanced CLI with more configuration options
 - **Fixed narrative overlap between chapters**: Implemented chapter ending tracking and explicit instructions to prevent repetition at chapter transitions
+
+## PDF Generation
+
+Convert your stories to professionally formatted PDFs:
+
+### CLI PDF Generation
+
+Generate PDF from a specific chapter:
+```bash
+python publish_to_pdf.py outputs/run-20231001-120000/chapters/chapter_01.md -o story_output/MyStory.pdf -t "My Story"
+```
+
+Generate PDF from all chapters in a directory:
+```bash
+python publish_to_pdf.py outputs/run-20231001-120000/chapters -o story_output/CompleteStory.pdf -t "Complete Story"
+```
+
+### PDF Features
+
+- **Custom Fonts**: Automatically downloads and registers beautiful fonts (Crimson Text, Cinzel)
+- **Professional Layout**: Proper margins, spacing, and typography
+- **Chapter Detection**: Automatically identifies chapters from Markdown files
+- **Background Colors**: Eye-friendly paper-like background
+- **Markdown Support**: Handles headings, lists, blockquotes, and code blocks
