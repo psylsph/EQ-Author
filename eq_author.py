@@ -270,6 +270,43 @@ def load_story_prompt(story_file: Optional[str], story_text: Optional[str]) -> s
     return p.read_text(encoding="utf-8").strip()
 
 
+def is_adult_target(story_text: str) -> bool:
+    """Return True if the story text/metadata indicates an adult target audience."""
+    if not story_text:
+        return False
+    lower = story_text.lower()
+
+    # Check common metadata lines like 'Target Audience: Adults' or genre containing 'adult'
+    for line in story_text.splitlines():
+        l = line.lower().strip()
+        if "target audience" in l and ("adult" in l or "adults" in l or "18+" in l):
+            return True
+        if l.startswith("**target audience:**") and ("adult" in l or "adults" in l or "18+" in l):
+            return True
+
+    # Fallback: check for the word 'adult' or 'erotic' in genre or anywhere near the top
+    head = "\n".join(story_text.splitlines()[:10]).lower()
+    if "adult" in head or "erotic" in head:
+        return True
+
+    return False
+
+
+def load_prompt_override_file() -> str:
+    """Load the project-level `prompt_override.txt` if present next to this script.
+
+    Returns empty string if file is missing or unreadable.
+    """
+    try:
+        base = Path(__file__).parent
+        p = base / "prompt_override.txt"
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
+
+
 def build_step1_prompt() -> str:
     # Step 1 does not assume a chapter count; the model proposes one.
     return (
@@ -613,9 +650,46 @@ def run_workflow_v2(
         max_context_tokens=max_context_tokens
     )
 
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": "You are a helpful assistant"},
-    ]
+    # Prepare initial system message(s). If the story prompt indicates an adult target,
+    # prepend the contents of `prompt_override.txt` (if present) to the system prompt.
+    messages: List[Dict[str, str]] = []
+    try:
+        override = ""
+        if is_adult_target(story_prompt):
+            override = load_prompt_override_file() or ""
+
+        if override:
+            # Prepend override content before the default assistant system message
+            messages.append({"role": "system", "content": override})
+
+            # CLI indicator for override usage and persist the override to the output directory
+            try:
+                print("[PROMPT OVERRIDE] Applied prompt_override.txt (adult target detected)", flush=True)
+                # write a copy of the override into the run output dir for traceability
+                try:
+                    (out_dir / "prompt_override_used.txt").write_text(override, encoding="utf-8")
+                except Exception:
+                    # If out_dir isn't available or write fails, ignore silently
+                    pass
+            except Exception:
+                pass
+        else:
+            # Adult target detected but no override content available
+            try:
+                print("[PROMPT OVERRIDE] Detected adult target but `prompt_override.txt` is missing or empty", flush=True)
+                try:
+                    (out_dir / "prompt_override_missing.txt").write_text("(no override file present)", encoding="utf-8")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    except Exception:
+        # If anything goes wrong reading override, just fall back to default
+        pass
+
+    # Always include the standard system instruction
+    messages.append({"role": "system", "content": "You are a helpful assistant"})
 
     # Step 1: brainstorm + reflection + propose chapter count
     step1 = build_step1_prompt().replace("{STORY_PROMPT}", story_prompt)

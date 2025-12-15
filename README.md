@@ -139,6 +139,88 @@ python eq_author.py --story-file idea.txt --base-url http://127.0.0.1:11434/v1 -
 python eq_author.py --story-file idea.txt --base-url http://192.168.1.227:1234/v1 --model gemma-3-12b-it
 ```
 
+### Prompt Override for Adult Target
+
+If your idea metadata indicates an adult target audience (for example a metadata line like `**Target Audience:** Adults` or a genre containing the word "Adult" or "Erotic"), EQ-Author will automatically attempt to apply a project-level prompt override.
+
+- Place a file named `prompt_override.txt` in the project root (the same directory as `eq_author.py`).
+- When an adult target is detected, the file contents are prepended as an initial `system` message before the default `You are a helpful assistant` system message.
+- CLI indicators and trace files:
+   - When the override is applied you will see a concise console message:
+      - `[PROMPT OVERRIDE] Applied prompt_override.txt (adult target detected)`
+   - A copy of the applied override is written to the run output directory as `prompt_override_used.txt` for traceability.
+   - If an adult target is detected but `prompt_override.txt` is missing or empty you will see:
+      - `[PROMPT OVERRIDE] Detected adult target but `prompt_override.txt` is missing or empty`
+   - In that case a small marker file `prompt_override_missing.txt` is written to the run output directory.
+
+This allows you to centralise any extra system-level instructions (for example stylistic constraints, safety or legal guidance, or account-specific instructions that should always be applied to adult pieces) without editing the code.
+
+Example `prompt_override.txt` (very small example):
+```
+You are an adult-content editor. Follow the author's stylistic intentions while respecting local laws and content safety constraints. When asked to produce explicit content, ensure the output matches the author's explicit request and formatting instructions.
+```
+
+Tip: The override is applied based on a simple metadata check near the top of the idea file (case-insensitive). If your idea uses a different metadata format, add a clear `Target Audience` line near the top.
+
+### Local API Providers — LM Studio & Ollama
+
+When running models locally you typically talk to a local HTTP API. Common examples and defaults used in examples above:
+
+- LM Studio (local server): `http://127.0.0.1:11434/v1` is a common default base URL used by LM Studio installations. Use the `:11434` port in examples above if your local LM Studio instance listens there.
+- Ollama (local server): Ollama also exposes an HTTP-compatible API. The base URL and port can vary depending on your Ollama configuration; a common pattern is `http://127.0.0.1:<port>/v1` (replace `<port>` with your configured API port).
+
+Notes and how to confirm the correct port:
+
+- Check the local service UI or logs for the configured API port. Both LM Studio and Ollama surface their API settings in their local admin UI or startup logs.
+- You can quickly verify connectivity and available models from your chosen server by running a small Python test or using `curl`. For example (adjust `BASE_URL` and `MODEL` for your setup):
+
+```bash
+# Quick connectivity test (list models) — Python (requires OpenAI-like client configured)
+python - <<'PY'
+from openai import OpenAI
+client = OpenAI(api_key='any-non-empty-string', base_url='http://127.0.0.1:11434/v1')
+print(client.models.list())
+PY
+```
+
+Or with `curl` (if your server exposes a models endpoint):
+
+```bash
+curl "http://127.0.0.1:11434/v1/models" -H "Authorization: Bearer <API_KEY>"
+```
+
+If you run into connection errors, double-check the base URL and port, ensure the server is running and accessible from your machine, and confirm any required API key or auth settings for the server in question.
+
+#### Example: LM Studio model with 12,000-token context window
+
+For an LM Studio model that supports approximately 12,000 context tokens, use a balanced approach but reduce per-summary length and the number of recent full chapters to stay comfortably under the limit.
+
+Recommended flags:
+
+```bash
+python eq_author.py \
+   --story-file ideas/my_story.md \
+   --base-url http://127.0.0.1:11434/v1 \
+   --model <your-lmstudio-model-name> \
+   --non-interactive \
+   --stream \
+   --context-strategy balanced \
+   --max-context-tokens 12000 \
+   --summary-length 150 \
+   --recent-chapters 1 \
+   --temperature 0.8
+```
+
+Why these choices:
+
+- `--context-strategy balanced`: keeps full text for the most recent chapter(s) while retaining summaries for earlier chapters for continuity.
+- `--max-context-tokens 12000`: tells the tool to target a 12k token budget when estimating context usage.
+- `--summary-length 150`: shorter summaries reduce token usage while preserving plot signals.
+- `--recent-chapters 1`: keep only the last chapter in full to save tokens while maintaining immediate continuity.
+- `--temperature 0.8`: gives a slight reduction from the default to help with focused, coherent chapter generation.
+
+If you see context warnings during a run, reduce `--summary-length` further (e.g., 100) or lower `--recent-chapters` to 0 to rely on summaries only.
+
 ### Prompt Caching
 
 Enable caching (default):
