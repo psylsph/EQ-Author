@@ -9,3 +9,7 @@ package-lock.json
 outputs
 *.md
 *.pdf
+.coverage
+use-this.txt
+prompt_override.txt
+

@@ -445,16 +445,45 @@ Each run creates a timestamped directory under `outputs/run-YYYYmmdd-HHMMSS/` co
 
 ### Running Tests
 
-Currently, there is no automated test suite. Manual verification is recommended:
+The project includes a comprehensive test suite using pytest:
 
-1. Run the planner with a sample idea:
 ```bash
-python eq_author.py --story-file ideas/Sample.md --n-chapters 2 --non-interactive --stream
+# Run all tests
+python -m pytest tests/ -v
+
+# Run with coverage report
+python -m pytest tests/ --cov=eq_author --cov-report=term-missing
+
+# Generate HTML coverage report
+python -m pytest tests/ --cov=eq_author --cov-report=html
 ```
 
-2. Verify outputs in the latest `outputs/run-*` folder
+**Test Coverage:** The test suite covers:
+- Text processing utilities (word counting, chapter endings, marker stripping)
+- Prompt loading and story processing
+- Context management
+- Prompt caching
+- Chapter proposal parsing
+- Workflow utilities (prompt building, output writing)
+- Progress detection and resume functionality
+- Argument parsing and CLI
 
-3. Check the generated Markdown and PDFs for proper formatting
+**Target Coverage:** 80% unit test coverage for core utilities
+
+### Test Structure
+
+```
+tests/
+├── conftest.py                 # Pytest fixtures and configuration
+├── test_args.py               # Argument parsing tests
+├── test_chapter_parsing.py    # Chapter count parsing tests
+├── test_context_manager.py    # Context management tests
+├── test_prompt_cache.py       # Prompt caching tests
+├── test_prompt_loading.py     # Story prompt loading tests
+├── test_resume.py             # Resume/detection tests
+├── test_text_processing.py    # Text utility tests
+└── test_workflow_utils.py     # Workflow utility tests
+```
 
 ### Contributing
 
@@ -464,6 +493,8 @@ When contributing to the project:
 2. Maintain compatibility with `--non-interactive` flows for automation
 3. Update documentation when adding new flags or changing defaults
 4. Test with multiple API providers when making connection changes
+5. Add unit tests for new utility functions (target 80% coverage)
+6. Run full test suite before submitting PRs
 
 ## License
 
