@@ -3,7 +3,8 @@
 import pytest
 import sys
 from pathlib import Path
-from eq_author import parse_args, get_env_var_for_arg
+from eq_author.cli import parse_args, get_env_var_for_arg
+from eq_author.main import _get_api_key, _get_cache
 
 
 class TestParseArgs:
