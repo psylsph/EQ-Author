@@ -34,9 +34,8 @@ WORD_RE = re.compile(r"\b[\w'\-]+\b")
 DEFAULT_CONTEXT_STRATEGY = "aggressive"
 DEFAULT_SUMMARY_LENGTH = 250
 DEFAULT_RECENT_CHAPTERS = 2
-CONTEXT_WARNING_THRESHOLD = 0.8
-CONTEXT_CRITICAL_THRESHOLD = 0.95
-UNLIMITED_STRATEGY = "unlimited"
+CONTEXT_WARNING_THRESHOLD = 0.75  # Warn at 75%
+CONTEXT_CRITICAL_THRESHOLD = 0.90  # Critical at 90%
 
 # Model-specific context limits
 DEFAULT_MAX_CONTEXT_TOKENS = 8000  # Default for most models
@@ -74,11 +73,10 @@ class ContextManager:
             "chapter": chapter_num,
             "summary": summary,
             "ending": ending,
-            "full_text": chapter_text if self.strategy in ["full", "unlimited"] else None
         })
         
         # Keep recent full chapters if strategy allows
-        if self.strategy == "balanced" or self.strategy == "full":
+        if self.strategy == "balanced":
             self.recent_full_chapters.append({
                 "chapter": chapter_num,
                 "text": chapter_text
@@ -118,22 +116,6 @@ class ContextManager:
                     "role": "assistant",
                     "content": f"Chapter {chapter_info['chapter']} Full Text:\n{chapter_info['text']}"
                 })
-                
-        elif self.strategy == "full":
-            # Try to include everything (may cause overflow)
-            for summary_info in self.chapter_summaries:
-                context.append({
-                    "role": "assistant",
-                    "content": f"Chapter {summary_info['chapter']} Full Text:\n{summary_info['full_text']}"
-                })
-                
-        elif self.strategy == "unlimited":
-            # Include all full chapters without any summarization or limits
-            for summary_info in self.chapter_summaries:
-                context.append({
-                    "role": "assistant",
-                    "content": f"Chapter {summary_info['chapter']} Full Text:\n{summary_info['full_text']}"
-                })
         
         return context
     
@@ -155,13 +137,34 @@ class ContextManager:
         
         usage_ratio = estimated_tokens / self.max_context_tokens
         
+        suggestions = []
+        if self.recent_chapters > 1:
+            suggestions.append("reduce --recent-chapters to 1")
+        if self.summary_length > 200:
+            suggestions.append("reduce --summary-length to 200")
+        
         return {
             "estimated_tokens": estimated_tokens,
             "max_tokens": self.max_context_tokens,
             "usage_ratio": usage_ratio,
             "is_warning": usage_ratio > CONTEXT_WARNING_THRESHOLD,
-            "is_critical": usage_ratio > CONTEXT_CRITICAL_THRESHOLD
+            "is_critical": usage_ratio > CONTEXT_CRITICAL_THRESHOLD,
+            "suggestions": suggestions
         }
+    
+    def truncate_context(self, target_ratio: float = 0.85) -> None:
+        """Reduce context size to fit within target ratio."""
+        current_ratio = self.check_context_size(self.build_context(999))["usage_ratio"]
+        
+        if current_ratio <= target_ratio:
+            return
+        
+        if len(self.chapter_summaries) > 1:
+            self.chapter_summaries.pop(0)
+        
+        if len(self.recent_full_chapters) > 1:
+            self.recent_full_chapters.pop(0)
+            self.summary_length = max(100, self.summary_length - 50)
 
 
 def generate_chapter_summary(client: Any, model: str, chapter_text: str, chapter_num: int,
@@ -196,6 +199,139 @@ def generate_chapter_summary(client: Any, model: str, chapter_text: str, chapter
     )
     
     return summary.strip()
+
+
+def auto_review_chapter(
+    client: Any,
+    model: str,
+    chapter_text: str,
+    chapter_num: int,
+    previous_chapter_ending: str = "",
+    stream: bool = False,
+    temperature: Optional[float] = None,
+    cache: Optional['PromptCache'] = None,
+) -> tuple[str, str, bool]:
+    """Have the LLM review and optionally rewrite a chapter.
+
+    Returns a tuple of (review_notes, rewritten_text, llm_approved).
+    - llm_approved: True if the LLM says the chapter is acceptable (final authority)
+
+    The LLM's judgment overrides the word count check. If the LLM says
+    the chapter is good quality (even if under 2500 words), it will be approved.
+    """
+    word_count = count_words(chapter_text)
+
+    review_prompt = f"""You are an expert book editor reviewing Chapter {chapter_num} of a novel.
+
+The chapter has {word_count} words (target: {CHAPTER_MIN_WORDS}+, but quality matters more than length).
+
+Please review thoroughly and determine if the chapter is acceptable as-is or needs improvement.
+
+{('Previous chapter ended: ' + previous_chapter_ending) if previous_chapter_ending else 'No previous chapter context (this is chapter 1).'}
+
+Evaluate:
+1. **Narrative Flow**: Is the story engaging and well-paced?
+2. **Character Consistency**: Are characters consistent and believable?
+3. **Dialogue Quality**: Is dialogue natural and purposeful?
+4. **Scene Description**: Are scenes vivid and immersive?
+5. **Pacing**: Does the chapter maintain good momentum?
+6. **Continuity**: Does it flow naturally from previous chapter?
+7. **Completeness**: Does it accomplish its narrative purpose?
+
+IMPORTANT: A chapter under {CHAPTER_MIN_WORDS} words can still be APPROVED if:
+- It tells a complete, satisfying story segment
+- Quality of prose is excellent
+- It serves its narrative purpose well
+- It's not unnecessarily short
+
+OUTPUT YOUR REVIEW IN THIS FORMAT:
+```
+## Quality Assessment
+- Word Count: X (target: {CHAPTER_MIN_WORDS}+)
+- Narrative Flow: X/5
+- Character Consistency: X/5
+- Dialogue Quality: X/5
+- Scene Description: X/5
+- Pacing: X/5
+- Overall: X/5
+
+## Verdict
+ACCEPTABLE (chapter meets quality standards) - No rewrite needed
+OR
+NEEDS_IMPROVEMENT (specific issues listed below)
+
+## Review Notes
+[Your detailed review of what's working, what could be better, and why you made your verdict]
+
+## Rewrite Recommendation
+ACCEPTABLE or NEEDS_IMPROVEMENT
+
+[If NEEDS_IMPROVEMENT: Provide the rewritten chapter below, keeping continuity and improving the identified issues]
+[If ACCEPTABLE: Just output "ACCEPTABLE - Chapter approved as-is" for the chapter text]
+```
+
+Remember: Your judgment is final. Approve good chapters even if they're shorter than the target. Rewrite only if there are significant quality issues.
+
+Chapter to review:
+{chapter_text}
+"""
+
+    messages = [
+        {"role": "system", "content": "You are a professional book editor. Your judgment is final - approve good chapters even if they're shorter than the target. Only recommend rewrite for significant quality issues."},
+        {"role": "user", "content": review_prompt}
+    ]
+
+    review = chat_once(
+        client,
+        model,
+        messages,
+        stream=stream,
+        temperature=temperature,
+        cache=cache
+    )
+
+    # Check for acceptance
+    upper_review = review.upper()
+    is_acceptable = (
+        "VERDICT" in upper_review and "ACCEPTABLE" in upper_review and "NEEDS_IMPROVEMENT" not in upper_review[:upper_review.find("VERDICT")+50]
+    ) or "ACCEPTABLE - CHAPTER APPROVED" in upper_review
+    is_needs_improvement = "NEEDS_IMPROVEMENT" in upper_review and "ACCEPTABLE" not in upper_review[:upper_review.find("NEEDS_IMPROVEMENT")+50]
+
+    # Also check "Rewrite Recommendation" section
+    if "RECOMMENDATION" in upper_review:
+        recap_start = upper_review.find("RECOMMENDATION")
+        recap_section = upper_review[recap_start:recap_start + 200]
+        is_acceptable = is_acceptable or "ACCEPTABLE" in recap_section
+        is_needs_improvement = is_needs_improvement or "NEEDS_IMPROVEMENT" in recap_section
+
+    if is_acceptable and not is_needs_improvement:
+        return review, chapter_text, True
+
+    if is_needs_improvement:
+        # Extract the rewritten chapter
+        lines = review.split("\n")
+        in_rewrite_section = False
+        rewritten_parts = []
+        for line in lines:
+            line_upper = line.upper()
+            if "ACCEPTABLE" in line_upper and "CHAPTER APPROVED" in line_upper:
+                break
+            if "RECOMMENDATION" in line_upper:
+                if "ACCEPTABLE" in line_upper:
+                    break
+                else:
+                    in_rewrite_section = True
+                continue
+            if in_rewrite_section and line.strip() and not line.strip().startswith("##"):
+                rewritten_parts.append(line)
+        rewritten_text = "\n".join(rewritten_parts).strip()
+        if not rewritten_text or len(rewritten_text) < 100:
+            # Fallback: use original if extraction failed
+            rewritten_text = chapter_text
+        return review, rewritten_text, False
+
+    # Default: if verdict is unclear, accept the chapter (LLM is authoritative)
+    return review, chapter_text, True
 
 
 def count_words(text: str) -> int:
@@ -760,7 +896,6 @@ def run_workflow_v2_skip_planning(
     summary_length: int = DEFAULT_SUMMARY_LENGTH,
     recent_chapters: int = DEFAULT_RECENT_CHAPTERS,
     max_context_tokens: Optional[int] = None,
-    unlimited_context: bool = False,
     always_autogen_chapters: bool = False,
 ) -> None:
     """Generate chapters using existing planning files (steps 1-5 must exist in out_dir).
@@ -818,11 +953,6 @@ def run_workflow_v2_skip_planning(
     if max_context_tokens is None:
         max_context_tokens = get_default_max_context_tokens(model)
 
-    # Handle unlimited context flag
-    if unlimited_context:
-        context_strategy = UNLIMITED_STRATEGY
-        max_context_tokens = 2**31 - 1
-
     # Initialize context manager
     context_manager = ContextManager(
         strategy=context_strategy,
@@ -845,7 +975,7 @@ def run_workflow_v2_skip_planning(
                     chapter_text = chapter_file.read_text(encoding="utf-8")
                     chapter_ending = extract_chapter_ending(chapter_text)
 
-                    if summary_file.exists() and not unlimited_context:
+                    if summary_file.exists():
                         chapter_summary = summary_file.read_text(encoding="utf-8")
                     else:
                         chapter_summary = chapter_text
@@ -876,19 +1006,18 @@ def run_workflow_v2_skip_planning(
             )
 
     print(f"Generating chapters {last_chapter + 1} through {n_chapters}")
-
+    
     # Chapter writing: chapter last_chapter+1 .. N
     for i in range(last_chapter + 1, n_chapters + 1):
         previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
         context_messages = context_manager.build_context(i)
         context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
 
-        if not unlimited_context:
-            context_status = context_manager.check_context_size(context_messages)
-            if context_status["is_warning"]:
-                print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
-            if context_status["is_critical"]:
-                print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
+        context_status = context_manager.check_context_size(context_messages)
+        if context_status["is_warning"]:
+            print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
+        if context_status["is_critical"]:
+            print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
 
         if stream:
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
@@ -939,22 +1068,43 @@ def run_workflow_v2_skip_planning(
         else:
             print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
+        # Auto-review loop: LLM reviews and potentially rewrites chapter
+        if always_autogen_chapters:
+            print(f"\n=== Auto-Reviewing Chapter {i} ===", flush=True)
+            review_count = 0
+            max_auto_reviews = 2
+            llm_approved = False
+            while review_count < max_auto_reviews and not llm_approved:
+                previous_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
+                review_notes, reviewed_text, llm_approved = auto_review_chapter(
+                    client, model, final_text, i, previous_ending, stream, temperature, cache
+                )
+
+                review_file = out_dir / "chapters" / f"chapter_{i:02d}_review.md"
+                (out_dir / "chapters").mkdir(parents=True, exist_ok=True)
+                review_file.write_text(review_notes, encoding="utf-8")
+
+                if reviewed_text != final_text:
+                    print(f"Chapter {i} auto-rewritten based on review.", flush=True)
+                    final_text = reviewed_text
+                    last_word_count = count_words(final_text)
+                    print(f"New word count: {last_word_count}", flush=True)
+                    review_count += 1
+                else:
+                    print(f"Chapter {i} review: No rewrite needed.", flush=True)
+                    break
+
         write_chapter_output(out_dir, i, final_text)
 
         chapter_ending = extract_chapter_ending(final_text)
 
-        if unlimited_context:
-            chapter_summary = final_text
-            if stream:
-                print(f"\n=== Unlimited Context Mode: Skipping Chapter {i} Summarization ===", flush=True)
-        else:
-            if stream:
-                print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-            chapter_summary = generate_chapter_summary(
-                client, model, final_text, i, summary_length, stream, temperature, cache
-            )
-            summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
-            summary_file.write_text(chapter_summary, encoding="utf-8")
+        if stream:
+            print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
+        chapter_summary = generate_chapter_summary(
+            client, model, final_text, i, summary_length, stream, temperature, cache
+        )
+        summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
+        summary_file.write_text(chapter_summary, encoding="utf-8")
 
         context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
 
@@ -980,8 +1130,8 @@ def run_workflow_v2_resume(
     summary_length: int = DEFAULT_SUMMARY_LENGTH,
     recent_chapters: int = DEFAULT_RECENT_CHAPTERS,
     max_context_tokens: Optional[int] = None,
-    unlimited_context: bool = False,
     always_autogen_chapters: bool = False,
+    n_chapters: Optional[int] = None,
 ) -> None:
     """Resume a previous workflow run from where it left off."""
     client = make_client(api_key, base_url)
@@ -1013,13 +1163,23 @@ def run_workflow_v2_resume(
     progress = detect_progress(out_dir)
     last_step = progress["last_step"]
     last_chapter = progress["last_chapter"]
-    n_chapters = progress["n_chapters"]
 
     print(f"Detected progress: Steps 1-{last_step} complete, Chapters 1-{last_chapter} complete")
 
-    if n_chapters is None:
+    # Use provided n_chapters, or detect from previous run, or use default
+    if n_chapters is not None:
+        print(f"Using provided chapter count: {n_chapters}")
+        detected_n_chapters = n_chapters
+    elif progress.get("n_chapters") is not None:
+        detected_n_chapters = progress["n_chapters"]
+        print(f"Detected chapter count from previous run: {detected_n_chapters}")
+    else:
         print("Warning: Could not determine total chapter count from previous run")
-        n_chapters = 12  # Default fallback
+        print("Using default chapter count: 12 (use --n-chapters to override)")
+        detected_n_chapters = 12
+
+    # Ensure n_chapters is an int
+    n_chapters = int(detected_n_chapters)
 
     # Load existing context
     messages = load_existing_context(out_dir, progress)
@@ -1028,11 +1188,6 @@ def run_workflow_v2_resume(
     # Use model-specific default if max_context_tokens is not provided
     if max_context_tokens is None:
         max_context_tokens = get_default_max_context_tokens(model)
-
-    # Handle unlimited context flag
-    if unlimited_context:
-        context_strategy = UNLIMITED_STRATEGY
-        max_context_tokens = 2**31 - 1
 
     # Initialize context manager
     context_manager = ContextManager(
@@ -1056,7 +1211,7 @@ def run_workflow_v2_resume(
                     chapter_text = chapter_file.read_text(encoding="utf-8")
                     chapter_ending = extract_chapter_ending(chapter_text)
 
-                    if summary_file.exists() and not unlimited_context:
+                    if summary_file.exists():
                         chapter_summary = summary_file.read_text(encoding="utf-8")
                     else:
                         chapter_summary = chapter_text
@@ -1268,12 +1423,11 @@ def run_workflow_v2_resume(
         context_messages = context_manager.build_context(i)
         context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
 
-        if not unlimited_context:
-            context_status = context_manager.check_context_size(context_messages)
-            if context_status["is_warning"]:
-                print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
-            if context_status["is_critical"]:
-                print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
+        context_status = context_manager.check_context_size(context_messages)
+        if context_status["is_warning"]:
+            print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
+        if context_status["is_critical"]:
+            print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
 
         if stream:
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
@@ -1324,22 +1478,87 @@ def run_workflow_v2_resume(
         else:
             print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
+        # Feedback loop: allow re-writing chapter based on feedback
+        if not always_autogen_chapters:
+            feedback_loop_count = 0
+            max_feedback_loops = 3
+            while feedback_loop_count < max_feedback_loops:
+                fb = maybe_collect_feedback(f"chapter {i}")
+                if not fb:
+                    break
+
+                print(f"\n=== Re-writing Chapter {i} with feedback (attempt {feedback_loop_count + 1}) ===", flush=True)
+                feedback_prompt = (
+                    f"Please rewrite Chapter {i} incorporating this feedback:\n\n"
+                    f"FEEDBACK: {fb}\n\n"
+                    f"Previous chapter text:\n{final_text[:2000]}...\n\n"
+                    "Rewrite the entire chapter with the feedback applied. "
+                    "Maintain continuity with previous chapters. "
+                    "Output only the revised chapter text with no commentary."
+                )
+                rewrite_messages = context_manager.build_context(i).copy()
+                rewrite_messages.append({"role": "user", "content": chapter_prompt(i, context_manager.get_previous_chapter_ending(i))})
+                rewrite_messages.append({"role": "user", "content": feedback_prompt})
+
+                ch = chat_once(
+                    client, model, rewrite_messages,
+                    stream=stream, temperature=temperature,
+                    on_token=token_handler if stream else None,
+                    cache=cache,
+                )
+                if stream:
+                    print("\n", flush=True)
+
+                new_word_count = count_words(ch)
+                if new_word_count >= CHAPTER_MIN_WORDS:
+                    final_text = ch
+                    last_word_count = new_word_count
+                    print(f"Chapter {i} rewritten. Word count: {last_word_count}", flush=True)
+                else:
+                    print(f"Warning: Rewritten chapter has {new_word_count} words (needs >= {CHAPTER_MIN_WORDS})", flush=True)
+
+                context_messages.append({"role": "user", "content": f"FEEDBACK FOR CHAPTER {i}:\n{fb}\nPlease apply this feedback."})
+                context_messages.append({"role": "assistant", "content": final_text})
+
+                feedback_loop_count += 1
+
+        # Auto-review loop: LLM reviews and potentially rewrites chapter
+        if always_autogen_chapters:
+            print(f"\n=== Auto-Reviewing Chapter {i} ===", flush=True)
+            review_count = 0
+            max_auto_reviews = 2
+            llm_approved = False
+            while review_count < max_auto_reviews and not llm_approved:
+                previous_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
+                review_notes, reviewed_text, llm_approved = auto_review_chapter(
+                    client, model, final_text, i, previous_ending, stream, temperature, cache
+                )
+
+                review_file = out_dir / "chapters" / f"chapter_{i:02d}_review.md"
+                (out_dir / "chapters").mkdir(parents=True, exist_ok=True)
+                review_file.write_text(review_notes, encoding="utf-8")
+
+                if reviewed_text != final_text:
+                    print(f"Chapter {i} auto-rewritten based on review.", flush=True)
+                    final_text = reviewed_text
+                    last_word_count = count_words(final_text)
+                    print(f"New word count: {last_word_count}", flush=True)
+                    review_count += 1
+                else:
+                    print(f"Chapter {i} review: No rewrite needed.", flush=True)
+                    break
+
         write_chapter_output(out_dir, i, final_text)
 
         chapter_ending = extract_chapter_ending(final_text)
 
-        if unlimited_context:
-            chapter_summary = final_text
-            if stream:
-                print(f"\n=== Unlimited Context Mode: Skipping Chapter {i} Summarization ===", flush=True)
-        else:
-            if stream:
-                print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-            chapter_summary = generate_chapter_summary(
-                client, model, final_text, i, summary_length, stream, temperature, cache
-            )
-            summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
-            summary_file.write_text(chapter_summary, encoding="utf-8")
+        if stream:
+            print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
+        chapter_summary = generate_chapter_summary(
+            client, model, final_text, i, summary_length, stream, temperature, cache
+        )
+        summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
+        summary_file.write_text(chapter_summary, encoding="utf-8")
 
         context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
 
@@ -1367,7 +1586,6 @@ def run_workflow_v2(
     summary_length: int = DEFAULT_SUMMARY_LENGTH,
     recent_chapters: int = DEFAULT_RECENT_CHAPTERS,
     max_context_tokens: Optional[int] = None,
-    unlimited_context: bool = False,
     always_autogen_chapters: bool = False,
 ) -> None:
     client = make_client(api_key, base_url)
@@ -1400,12 +1618,7 @@ def run_workflow_v2(
     # Use model-specific default if max_context_tokens is not provided
     if max_context_tokens is None:
         max_context_tokens = get_default_max_context_tokens(model)
-    
-    # Handle unlimited context flag
-    if unlimited_context:
-        context_strategy = UNLIMITED_STRATEGY
-        max_context_tokens = 2**31 - 1  # Use a very large integer instead of infinity
-    
+
     # Initialize context manager
     context_manager = ContextManager(
         strategy=context_strategy,
@@ -1702,13 +1915,12 @@ def run_workflow_v2(
         context_messages = context_manager.build_context(i)
         context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
         
-        # Check context size (skip for unlimited context)
-        if not unlimited_context:
-            context_status = context_manager.check_context_size(context_messages)
-            if context_status["is_warning"]:
-                print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
-            if context_status["is_critical"]:
-                print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
+        # Check context size
+        context_status = context_manager.check_context_size(context_messages)
+        if context_status["is_warning"]:
+            print(f"Warning: Context usage at {context_status['usage_ratio']:.1%} ({context_status['estimated_tokens']}/{context_status['max_tokens']} tokens)", flush=True)
+        if context_status["is_critical"]:
+            print(f"CRITICAL: Context usage at {context_status['usage_ratio']:.1%} - consider reducing context size", flush=True)
 
         if stream:
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
@@ -1770,27 +1982,91 @@ def run_workflow_v2(
         else:
             print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
+        # Feedback loop: allow re-writing chapter based on feedback
+        if not always_autogen_chapters:
+            feedback_loop_count = 0
+            max_feedback_loops = 3
+            while feedback_loop_count < max_feedback_loops:
+                fb = maybe_collect_feedback(f"chapter {i}")
+                if not fb:
+                    break
+
+                print(f"\n=== Re-writing Chapter {i} with feedback (attempt {feedback_loop_count + 1}) ===", flush=True)
+                feedback_prompt = (
+                    f"Please rewrite Chapter {i} incorporating this feedback:\n\n"
+                    f"FEEDBACK: {fb}\n\n"
+                    f"Previous chapter text:\n{final_text[:2000]}...\n\n"
+                    "Rewrite the entire chapter with the feedback applied. "
+                    "Maintain continuity with previous chapters. "
+                    "Output only the revised chapter text with no commentary."
+                )
+                rewrite_messages = context_manager.build_context(i).copy()
+                rewrite_messages.append({"role": "user", "content": chapter_prompt(i, context_manager.get_previous_chapter_ending(i))})
+                rewrite_messages.append({"role": "user", "content": feedback_prompt})
+
+                ch = chat_once(
+                    client, model, rewrite_messages,
+                    stream=stream, temperature=temperature,
+                    on_token=token_handler if stream else None,
+                    cache=cache,
+                )
+                if stream:
+                    print("\n", flush=True)
+
+                new_word_count = count_words(ch)
+                if new_word_count >= CHAPTER_MIN_WORDS:
+                    final_text = ch
+                    last_word_count = new_word_count
+                    print(f"Chapter {i} rewritten. Word count: {last_word_count}", flush=True)
+                else:
+                    print(f"Warning: Rewritten chapter has {new_word_count} words (needs >= {CHAPTER_MIN_WORDS})", flush=True)
+
+                context_messages.append({"role": "user", "content": f"FEEDBACK FOR CHAPTER {i}:\n{fb}\nPlease apply this feedback."})
+                context_messages.append({"role": "assistant", "content": final_text})
+
+                feedback_loop_count += 1
+
+        # Auto-review loop: LLM reviews and potentially rewrites chapter
+        if always_autogen_chapters:
+            print(f"\n=== Auto-Reviewing Chapter {i} ===", flush=True)
+            review_count = 0
+            max_auto_reviews = 2
+            llm_approved = False
+            while review_count < max_auto_reviews and not llm_approved:
+                previous_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
+                review_notes, reviewed_text, llm_approved = auto_review_chapter(
+                    client, model, final_text, i, previous_ending, stream, temperature, cache
+                )
+
+                review_file = out_dir / "chapters" / f"chapter_{i:02d}_review.md"
+                (out_dir / "chapters").mkdir(parents=True, exist_ok=True)
+                review_file.write_text(review_notes, encoding="utf-8")
+
+                if reviewed_text != final_text:
+                    print(f"Chapter {i} auto-rewritten based on review.", flush=True)
+                    final_text = reviewed_text
+                    last_word_count = count_words(final_text)
+                    print(f"New word count: {last_word_count}", flush=True)
+                    review_count += 1
+                else:
+                    print(f"Chapter {i} review: No rewrite needed.", flush=True)
+                    break
+
         write_chapter_output(out_dir, i, final_text)
 
         # Extract chapter ending before adding to context
         chapter_ending = extract_chapter_ending(final_text)
 
-        # Generate chapter summary for context management (skip for unlimited context)
-        if unlimited_context:
-            # For unlimited context, use the full text as the "summary" to maintain consistency
-            chapter_summary = final_text
-            if stream:
-                print(f"\n=== Unlimited Context Mode: Skipping Chapter {i} Summarization ===", flush=True)
-        else:
-            if stream:
-                print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-            chapter_summary = generate_chapter_summary(
-                client, model, final_text, i, summary_length, stream, temperature, cache
-            )
-            
-            # Save summary to file for reference
-            summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
-            summary_file.write_text(chapter_summary, encoding="utf-8")
+        # Generate chapter summary for context management
+        if stream:
+            print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
+        chapter_summary = generate_chapter_summary(
+            client, model, final_text, i, summary_length, stream, temperature, cache
+        )
+        
+        # Save summary to file for reference
+        summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
+        summary_file.write_text(chapter_summary, encoding="utf-8")
         
         # Add chapter to context manager with ending
         context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
@@ -1850,13 +2126,8 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     )
     
     # Context management options
-    p.add_argument("--context-strategy", type=str, choices=["aggressive", "balanced", "full", "unlimited"],
+    p.add_argument("--context-strategy", type=str, choices=["aggressive", "balanced"],
                    default=get_env_var_for_arg("context-strategy") or DEFAULT_CONTEXT_STRATEGY, help="Strategy for managing context window (default: aggressive)")
-    p.add_argument("--unlimited-context", action="store_true",
-                   help="Bypass all context management and keep all full chapters in memory without summarization", default=False)
-    env_unlimited = get_env_var_for_arg("unlimited-context")
-    if env_unlimited and env_unlimited.lower() in ("true", "1", "yes"):
-        p.set_defaults(unlimited_context=True)
     p.add_argument("--summary-length", type=int, default=DEFAULT_SUMMARY_LENGTH,
                    help=f"Target word count for chapter summaries (default: {DEFAULT_SUMMARY_LENGTH})")
     env_summary = get_env_var_for_arg("summary-length")
@@ -1945,8 +2216,8 @@ def main(argv: List[str]) -> int:
                 summary_length=args.summary_length,
                 recent_chapters=args.recent_chapters,
                 max_context_tokens=args.max_context_tokens,
-                unlimited_context=args.unlimited_context,
                 always_autogen_chapters=args.always_autogen_chapters,
+                n_chapters=args.n_chapters,
             )
         except Exception as e:
             print(f"Error during resume: {e}", file=sys.stderr)
@@ -2001,7 +2272,6 @@ def main(argv: List[str]) -> int:
                     summary_length=args.summary_length,
                     recent_chapters=args.recent_chapters,
                     max_context_tokens=args.max_context_tokens,
-                    unlimited_context=args.unlimited_context,
                     always_autogen_chapters=args.always_autogen_chapters,
                 )
             except Exception as e:
@@ -2023,7 +2293,6 @@ def main(argv: List[str]) -> int:
                 summary_length=args.summary_length,
                 recent_chapters=args.recent_chapters,
                 max_context_tokens=args.max_context_tokens,
-                unlimited_context=args.unlimited_context,
                 always_autogen_chapters=args.always_autogen_chapters,
             )
     except Exception as e:

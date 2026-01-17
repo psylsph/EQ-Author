@@ -98,11 +98,6 @@ For medium-context models (16K-32K tokens):
 python eq_author.py --story-file idea.txt --context-strategy balanced --summary-length 250 --recent-chapters 3 --max-context-tokens 24000
 ```
 
-For large-context models (64K+ tokens):
-```bash
-python eq_author.py --story-file idea.txt --context-strategy full --summary-length 400 --recent-chapters 5 --max-context-tokens 60000
-```
-
 ### Optimal Settings for DeepSeek
 
 For DeepSeek models with 128K max context length:
@@ -110,16 +105,6 @@ For DeepSeek models with 128K max context length:
 **Recommended (Balanced approach):**
 ```bash
 python eq_author.py --story-file idea.txt --context-strategy balanced --max-context-tokens 64000 --model deepseek-reasoner
-```
-
-**Maximum performance (Unlimited context):**
-```bash
-python eq_author.py --story-file idea.txt --unlimited-context --model deepseek-reasoner
-```
-
-For unlimited context (bypass all context management):
-```bash
-python eq_author.py --story-file idea.txt --unlimited-context
 ```
 
 ### Alternative API Providers
@@ -324,6 +309,8 @@ usage: eq_author.py [-h] [--story-file STORY_FILE] [--story-text STORY_TEXT]
                     [--unlimited-context] [--summary-length SUMMARY_LENGTH]
                     [--recent-chapters RECENT_CHAPTERS]
                     [--max-context-tokens MAX_CONTEXT_TOKENS]
+                    [--resume-from RESUME_FROM] [--skip-planning]
+                    [--always-autogen-chapters]
 
 options:
   -h, --help            show this help message and exit
@@ -356,6 +343,11 @@ options:
                         Number of recent full chapters to keep in context (default: 2)
   --max-context-tokens MAX_CONTEXT_TOKENS
                         Maximum context tokens to maintain (default: 128000)
+  --resume-from RESUME_FROM
+                        Resume from a previous run by providing the output directory path
+  --skip-planning       Skip planning steps (1-5) and use existing files from --output-dir for chapter generation
+  --always-autogen-chapters
+                        After completing planning steps (1-5), automatically generate all chapters with LLM review (no feedback prompts)
 ```
 
 ## Project Structure
@@ -366,9 +358,16 @@ EQ-Author/
 ├── publish_to_pdf.py     # PDF generation utilities
 ├── requirements.txt      # Python dependencies
 ├── README.md            # This file
+├── AGENTS.md            # AI assistant guidelines
 ├── Planning.md          # Detailed prompt templates
+├── .env.example         # Environment variables template
 ├── .env                 # Environment variables (create this)
+├── pytest.ini           # Pytest configuration
 ├── .prompt_cache/       # Prompt/response cache (auto-created)
+├── tests/               # Test suite
+│   ├── conftest.py
+│   ├── test_*.py        # Test files
+│   └── htmlcov/         # Coverage report (auto-generated)
 ├── ideas/               # Sample story ideas
 │   ├── Sample.md
 │   └── unit985.md
@@ -382,6 +381,7 @@ EQ-Author/
 │       └── chapters/
 │           ├── chapter_01.md
 │           ├── chapter_01_summary.md
+│           ├── chapter_01_review.md
 │           ├── chapter_02.md
 │           └── chapter_02_summary.md
 └── story_output/        # Generated PDFs (auto-created)
@@ -401,6 +401,75 @@ Each run creates a timestamped directory under `outputs/run-YYYYmmdd-HHMMSS/` co
 ### Chapter Files
 - `chapters/chapter_XX.md` - Individual chapter content
 - `chapters/chapter_XX_summary.md` - Chapter summaries (when using context management)
+- `chapters/chapter_XX_review.md` - LLM review notes (when using `--always-autogen-chapters`)
+
+## Advanced Features
+
+### Resume from Previous Run
+
+Resume a previous workflow run from where it left off:
+
+```bash
+# Resume from a previous run
+python eq_author.py --resume-from outputs/run-20250117-120000
+
+# Resume with explicit chapter count (overrides detected value)
+python eq_author.py --resume-from outputs/run-20250117-120000 --n-chapters 15
+```
+
+The resume function:
+- Detects which steps (1-5) are complete
+- Detects which chapters are complete
+- Loads existing context from previous outputs
+- Continues from the last incomplete step/chapter
+
+### Skip Planning and Generate Chapters
+
+Skip the 5-step planning workflow and generate chapters directly using existing planning files:
+
+```bash
+# Skip planning and generate chapters
+python eq_author.py --skip-planning --output-dir outputs/run-20250117-120000 --always-autogen-chapters
+```
+
+Requirements:
+- Planning files (steps 1-5) must exist in the output directory
+- Chapter count must be detectable from step 4 or provided via `--n-chapters`
+
+### Auto-Generate Chapters with LLM Review
+
+Automatically generate all chapters with LLM-based review and optional rewriting:
+
+```bash
+# Auto-generate chapters with LLM review
+python eq_author.py --story-file story.txt --always-autogen-chapters --non-interactive
+
+# Combined with skip-planning for fully automated chapter generation
+python eq_author.py --skip-planning --output-dir existing_run --always-autogen-chapters --non-interactive
+```
+
+**How Auto-Review Works:**
+1. Each chapter is generated with word count validation
+2. LLM reviews the chapter for:
+   - Word count assessment (target: 2500+ words)
+   - Narrative flow rating (1-5)
+   - Character consistency
+   - Dialogue quality
+   - Scene description
+   - Pacing
+   - Continuity with previous chapter
+3. If issues are found, the chapter is automatically re-written
+4. Up to 2 auto-review iterations per chapter
+5. Review notes are saved to `chapters/chapter_XX_review.md`
+
+**Output with Auto-Review:**
+```
+Chapter 1 word count: 2850
+=== Auto-Reviewing Chapter 1 ===
+Chapter 1 review: No rewrite needed.
+Chapter 1 saved to: outputs/run-.../chapters/chapter_01.md
+Review notes: outputs/run-.../chapters/chapter_01_review.md
+```
 
 ## Troubleshooting
 
@@ -476,6 +545,7 @@ python -m pytest tests/ --cov=eq_author --cov-report=html
 tests/
 ├── conftest.py                 # Pytest fixtures and configuration
 ├── test_args.py               # Argument parsing tests
+├── test_auto_review.py        # Auto-review and LLM chapter review tests
 ├── test_chapter_parsing.py    # Chapter count parsing tests
 ├── test_context_manager.py    # Context management tests
 ├── test_prompt_cache.py       # Prompt caching tests

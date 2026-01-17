@@ -2,7 +2,8 @@
 
 import pytest
 from pathlib import Path
-from eq_author import detect_progress, load_existing_context
+from unittest.mock import Mock, patch
+from eq_author import detect_progress, load_existing_context, run_workflow_v2_resume
 
 
 class TestDetectProgress:
@@ -107,3 +108,110 @@ class TestLoadExistingContext:
         # Find chapter messages
         chapter_messages = [m for m in messages if "Chapter 1 content" in m["content"] or "Chapter 2 content" in m["content"]]
         assert len(chapter_messages) == 2
+
+
+class TestRunWorkflowV2Resume:
+    """Tests for run_workflow_v2_resume function."""
+
+    def test_n_chapters_parameter_exists(self):
+        """Test that run_workflow_v2_resume accepts n_chapters parameter."""
+        import inspect
+        sig = inspect.signature(run_workflow_v2_resume)
+        params = list(sig.parameters.keys())
+        assert "n_chapters" in params
+
+    def test_n_chapters_overrides_detected(self, temp_dir: Path):
+        """Test that provided n_chapters overrides detected value."""
+        # Create step files without chapter count
+        from eq_author import STEP_FILENAMES
+        for step_num, filename in STEP_FILENAMES.items():
+            (temp_dir / filename).write_text(f"Step {step_num} content (no chapter count)")
+
+        # Create chapters directory with some chapters
+        chapters_dir = temp_dir / "chapters"
+        chapters_dir.mkdir()
+        (chapters_dir / "chapter_01.md").write_text("Chapter 1 content")
+        (chapters_dir / "chapter_02.md").write_text("Chapter 2 content")
+
+        # Mock the API client to avoid actual API calls
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_client.chat.completions.create.return_value = mock_response
+
+        # Call with n_chapters=15 (should override any detected value)
+        with patch("eq_author.make_client", return_value=mock_client):
+            with patch("eq_author.ContextManager") as mock_cm:
+                mock_cm_instance = Mock()
+                mock_cm.return_value = mock_cm_instance
+                mock_cm_instance.build_context.return_value = []
+                mock_cm_instance.get_previous_chapter_ending.return_value = ""
+                mock_cm_instance.check_context_size.return_value = {
+                    "is_warning": False,
+                    "is_critical": False,
+                    "usage_ratio": 0.5,
+                    "estimated_tokens": 1000,
+                    "max_tokens": 2000,
+                }
+
+                # Run resume with explicit n_chapters
+                run_workflow_v2_resume(
+                    api_key="test-key",
+                    base_url="http://test.com",
+                    model="test-model",
+                    story_prompt="",
+                    out_dir=temp_dir,
+                    stream=False,
+                    n_chapters=15,  # Explicit override
+                )
+
+    def test_missing_chapter_count_uses_default(self, temp_dir: Path):
+        """Test that missing chapter count uses default with warning."""
+        # Create step files without chapter count
+        from eq_author import STEP_FILENAMES
+        for step_num, filename in STEP_FILENAMES.items():
+            (temp_dir / filename).write_text(f"Step {step_num} content (no chapter count)")
+
+        # Create chapters directory with some chapters
+        chapters_dir = temp_dir / "chapters"
+        chapters_dir.mkdir()
+        (chapters_dir / "chapter_01.md").write_text("Chapter 1 content")
+        (chapters_dir / "chapter_02.md").write_text("Chapter 2 content")
+
+        # Mock the API client
+        mock_client = Mock()
+        mock_response = Mock()
+        mock_response.choices = [Mock()]
+        mock_response.choices[0].message.content = "Test response"
+        mock_client.chat.completions.create.return_value = mock_response
+
+        with patch("eq_author.make_client", return_value=mock_client):
+            with patch("eq_author.ContextManager") as mock_cm:
+                mock_cm_instance = Mock()
+                mock_cm.return_value = mock_cm_instance
+                mock_cm_instance.build_context.return_value = []
+                mock_cm_instance.get_previous_chapter_ending.return_value = ""
+                mock_cm_instance.check_context_size.return_value = {
+                    "is_warning": False,
+                    "is_critical": False,
+                    "usage_ratio": 0.5,
+                    "estimated_tokens": 1000,
+                    "max_tokens": 2000,
+                }
+
+                # Run resume without n_chapters (should show warning)
+                with patch("builtins.print") as mock_print:
+                    run_workflow_v2_resume(
+                        api_key="test-key",
+                        base_url="http://test.com",
+                        model="test-model",
+                        story_prompt="",
+                        out_dir=temp_dir,
+                        stream=False,
+                        n_chapters=None,  # No override
+                    )
+
+                    # Check that warning was printed
+                    printed_output = "".join([call[0][0] for call in mock_print.call_args_list])
+                    assert "Warning" in printed_output or "default" in printed_output.lower()

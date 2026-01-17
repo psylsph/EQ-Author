@@ -26,7 +26,6 @@ class TestParseArgs:
         assert args.no_cache is False
         assert args.cache_dir == ".prompt_cache"
         assert args.context_strategy == "aggressive"
-        assert args.unlimited_context is False
         assert args.summary_length == 250
         assert args.recent_chapters == 2
         assert args.max_context_tokens is None
@@ -96,14 +95,9 @@ class TestParseArgs:
 
     def test_context_strategy_argument(self):
         """Test --context-strategy argument."""
-        for strategy in ["aggressive", "balanced", "full", "unlimited"]:
+        for strategy in ["aggressive", "balanced"]:
             args = parse_args([f"--context-strategy", strategy])
             assert args.context_strategy == strategy
-
-    def test_unlimited_context_argument(self):
-        """Test --unlimited-context argument."""
-        args = parse_args(["--unlimited-context"])
-        assert args.unlimited_context is True
 
     def test_summary_length_argument(self):
         """Test --summary-length argument."""

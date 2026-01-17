@@ -83,18 +83,6 @@ class TestContextManagerChapters:
             cm.add_chapter(i, f"Chapter {i}", f"Summary {i}", f"Ending {i}")
         assert len(cm.chapter_summaries) == 5
 
-    def test_full_text_in_unlimited_mode(self):
-        """Test that full text is stored in unlimited mode."""
-        cm = ContextManager(strategy="unlimited")
-        cm.add_chapter(1, "Full text", "summary", "ending")
-        assert cm.chapter_summaries[0]["full_text"] == "Full text"
-
-    def test_full_text_not_stored_in_aggressive_mode(self):
-        """Test that full text is not stored in aggressive mode."""
-        cm = ContextManager(strategy="aggressive")
-        cm.add_chapter(1, "Full text", "summary", "ending")
-        assert cm.chapter_summaries[0]["full_text"] is None
-
     def test_recent_full_chapters_maintained(self):
         """Test that recent full chapters are maintained in balanced mode."""
         cm = ContextManager(strategy="balanced", recent_chapters=2)
@@ -141,16 +129,6 @@ class TestContextManagerBuildContext:
         # Should include core context + summaries of recent chapters (not full text)
         # The build_context method returns summaries for recent chapters as assistant messages
         assert len(context) >= 1  # At least core context
-
-    def test_unlimited_strategy_all_full(self):
-        """Test unlimited strategy includes all full text."""
-        cm = ContextManager(strategy="unlimited")
-        cm.add_core_context([{"role": "system", "content": "Core"}])
-        cm.add_chapter(1, "Full 1", "Summary 1", "End 1")
-        cm.add_chapter(2, "Full 2", "Summary 2", "End 2")
-        context = cm.build_context(2)
-        # Should include core context + full text of all chapters
-        assert len(context) >= 3  # Core + 2 full chapters
 
 
 class TestContextManagerTokenEstimation:
@@ -209,16 +187,16 @@ class TestContextManagerCheckContextSize:
         assert result["is_critical"] is False
 
     def test_warning_threshold(self):
-        """Test reaching warning threshold (80%)."""
+        """Test reaching warning threshold (75%)."""
         cm = ContextManager(max_context_tokens=1000)
-        # Create ~800 tokens (3200 chars) should trigger warning at 80%
+        # Create ~800 tokens (3200 chars) should trigger warning at 75%
         messages = [{"content": "x" * 3200}]
         result = cm.check_context_size(messages)
         # The actual ratio depends on the token estimation formula
         assert result["is_warning"] is True or result["usage_ratio"] >= 0.7
 
     def test_critical_threshold(self):
-        """Test reaching critical threshold (95%)."""
+        """Test reaching critical threshold (90%)."""
         cm = ContextManager(max_context_tokens=1000)
         # Create ~1000 tokens (4000 chars)
         messages = [{"content": "x" * 4000}]
