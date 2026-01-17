@@ -154,6 +154,7 @@ class TestRunWorkflowV2Resume:
                     "estimated_tokens": 1000,
                     "max_tokens": 2000,
                 }
+                mock_cm_instance.max_context_tokens = 2000
 
                 # Run resume with explicit n_chapters
                 run_workflow_v2_resume(
@@ -199,6 +200,7 @@ class TestRunWorkflowV2Resume:
                     "estimated_tokens": 1000,
                     "max_tokens": 2000,
                 }
+                mock_cm_instance.max_context_tokens = 2000
 
                 # Run resume without n_chapters (should show warning)
                 with patch("builtins.print") as mock_print:

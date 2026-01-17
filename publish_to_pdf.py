@@ -762,10 +762,14 @@ def process_story_to_pdf(input_text, output_filename='story.pdf', title='My Stor
         elements.append(Paragraph(xml_escape(chapter_title), chapter_style))
         elements.append(Spacer(1, 0.5*inch))
 
-        # Process chapter content
+        # Process chapter content - strip any chapter heading that might be in the body
         if content:
+            # Remove chapter heading patterns from content to prevent double-titling
+            content_clean = re.sub(r'(?im)^#{1,6}\s*chapter\s+[^\n]*\n*', '', content)
+            content_clean = re.sub(r'(?im)^chapter\s+[^\n]*\n*', '', content_clean)
+            
             chapter_flowables = build_flowables_from_markdown(
-                clean_text(content, preserve_markup=True),
+                clean_text(content_clean, preserve_markup=True),
                 body_style=body_style,
                 list_item_style=list_item_style,
                 code_style=code_style,

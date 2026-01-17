@@ -42,6 +42,11 @@ DEFAULT_MAX_CONTEXT_TOKENS = 8000  # Default for most models
 DEEPSEEK_REASONER_MAX_TOKENS = 128000  # Max for deepseek-reasoner
 DEEPSEEK_REASONER_DEFAULT_TOKENS = 32000  # Default for deepseek-reasoner
 
+# Model-specific output limits (max_tokens parameter)
+DEFAULT_MAX_OUTPUT_TOKENS = 4000  # Default for most models
+DEEPSEEK_MAX_OUTPUT_TOKENS = 8192  # Max output for DeepSeek models
+DEEPSEEK_REASONER_MAX_OUTPUT_TOKENS = 16384  # Max output for deepseek-reasoner
+
 # Model-specific temperature defaults
 DEFAULT_TEMPERATURE = 1.0  # Default for most models
 DEEPSEEK_REASONER_TEMPERATURE = 1.0  # Default for deepseek-reasoner
@@ -347,6 +352,60 @@ def extract_chapter_ending(chapter_text: str, max_sentences: int = 2) -> str:
     if len(sentences) <= max_sentences:
         return chapter_text.strip()
     return ' '.join(sentences[-max_sentences:]).strip()
+
+
+def validate_chapter_output(text: str) -> tuple[bool, str]:
+    """Validate chapter output for common issues.
+    
+    Returns (is_valid, issue_description).
+    If is_valid is False, the chapter should be regenerated.
+    """
+    if not text or len(text) < 100:
+        return False, "Chapter too short"
+    
+    stripped = text.strip()
+    
+    issues = []
+    
+    # Check if chapter ends with proper punctuation (not mid-sentence)
+    if stripped:
+        last_char = stripped[-1]
+        if last_char not in '.!?)"':
+            # Chapter doesn't end with terminal punctuation
+            # Check if it looks like a complete sentence (ends with word character followed by nothing)
+            last_words = stripped.split()[-5:] if stripped.split() else []
+            if last_words and not any(w[-1] in '.!?)"' for w in last_words if len(w) > 1):
+                issues.append("Chapter ends mid-sentence (no terminal punctuation)")
+    
+    # Check for repetitive patterns (same phrase repeated)
+    words = stripped.split()
+    if len(words) > 50:
+        # Look for exact sentence repetition
+        sentences = re.split(r'(?<=[.!?])\s+', stripped)
+        sentence_stripped = [s.strip().lower() for s in sentences if s.strip()]
+        if len(sentence_stripped) > 3:
+            from collections import Counter
+            sentence_counts = Counter(sentence_stripped)
+            most_common = sentence_counts.most_common(1)
+            if most_common and most_common[0][1] >= 3:
+                issues.append(f"Repetitive sentence detected: '{most_common[0][0][:50]}...'")
+    
+    # Check for line repetition (same line repeated)
+    lines = [l.strip() for l in stripped.split('\n') if l.strip()]
+    if len(lines) >= 5:
+        from collections import Counter
+        line_counts = Counter(lines)
+        most_common = line_counts.most_common(1)
+        if most_common and most_common[0][1] > 2:
+            issues.append(f"Repetitive line detected: '{most_common[0][0][:50]}...'")
+    
+    # Check for character repetition (e.g., "aaaaa" or "....")
+    if re.search(r'(.)\1{5,}', stripped):
+        issues.append("Excessive character repetition detected")
+    
+    if issues:
+        return False, "; ".join(issues)
+    return True, ""
 
 
 class PromptCache:
@@ -691,6 +750,7 @@ def chat_once(
     temperature: Optional[float] = None,
     on_token: Optional[Any] = None,
     cache: Optional[PromptCache] = None,
+    max_tokens: Optional[int] = None,
 ) -> str:
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -699,6 +759,8 @@ def chat_once(
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
 
     if cache is not None:
         cached = cache.get(model=model, messages=messages, temperature=temperature)
@@ -780,6 +842,28 @@ def get_default_max_context_tokens(model: str) -> int:
     if model.lower() == "deepseek-reasoner":
         return DEEPSEEK_REASONER_DEFAULT_TOKENS
     return DEFAULT_MAX_CONTEXT_TOKENS
+
+
+def get_default_max_output_tokens(model: str) -> int:
+    """Return the appropriate default max_output_tokens based on the model."""
+    model_lower = model.lower()
+    if "deepseek-reasoner" in model_lower:
+        return DEEPSEEK_REASONER_MAX_OUTPUT_TOKENS
+    if "deepseek" in model_lower:
+        return DEEPSEEK_MAX_OUTPUT_TOKENS
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def calculate_safe_max_tokens(context_tokens: int, max_context: int, model: str) -> int:
+    """Calculate a safe max_tokens value that leaves room for the response.
+    
+    We reserve ~20% of the context window for the model's response,
+    or use the model's default max output if that's smaller.
+    """
+    default_output = get_default_max_output_tokens(model)
+    available = max_context - context_tokens
+    reserved = int(available * 0.20)
+    return min(default_output, max(reserved, 500))  # At least 500 tokens
 
 
 def get_default_temperature(model: str) -> float:
@@ -1006,7 +1090,7 @@ def run_workflow_v2_skip_planning(
             )
 
     print(f"Generating chapters {last_chapter + 1} through {n_chapters}")
-    
+
     # Chapter writing: chapter last_chapter+1 .. N
     for i in range(last_chapter + 1, n_chapters + 1):
         previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
@@ -1023,50 +1107,94 @@ def run_workflow_v2_skip_planning(
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
         emit_progress(f"Chapter {i}")
 
-        attempts = 0
         final_text = ""
-        last_response = ""
         last_word_count = 0
 
-        while attempts < CHAPTER_MAX_ATTEMPTS:
-            ch = chat_once(
+        if always_autogen_chapters:
+            max_output_tokens = calculate_safe_max_tokens(
+                context_manager.check_context_size(context_messages)["estimated_tokens"],
+                context_manager.max_context_tokens,
+                model
+            )
+            final_text = chat_once(
                 client, model, context_messages,
                 stream=stream, temperature=temperature,
                 on_token=token_handler if stream else None,
                 cache=cache,
+                max_tokens=max_output_tokens,
             )
             if stream:
                 print("\n", flush=True)
-
-            last_response = ch
-            last_word_count = count_words(ch)
-
-            if last_word_count >= CHAPTER_MIN_WORDS:
-                final_text = ch
-                break
-
-            attempts += 1
-            if stream:
-                print(f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).", flush=True)
-
-            if attempts >= CHAPTER_MAX_ATTEMPTS:
-                break
-
-            retry_prompt = (
-                f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
-                f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
-                "Please rewrite the entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
-                "Output only the revised chapter text with no commentary."
-            )
-            context_messages.append({"role": "user", "content": retry_prompt})
-
-        if not final_text:
-            final_text = last_response
-
-        if last_word_count < CHAPTER_MIN_WORDS:
-            print(f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).", file=sys.stderr, flush=True)
-        else:
+            last_word_count = count_words(final_text)
             print(f"Chapter {i} word count: {last_word_count}", flush=True)
+        else:
+            attempts = 0
+            last_response = ""
+
+            while attempts < CHAPTER_MAX_ATTEMPTS:
+                max_output_tokens = calculate_safe_max_tokens(
+                    context_manager.check_context_size(context_messages)["estimated_tokens"],
+                    context_manager.max_context_tokens,
+                    model
+                )
+                ch = chat_once(
+                    client, model, context_messages,
+                    stream=stream, temperature=temperature,
+                    on_token=token_handler if stream else None,
+                    cache=cache,
+                    max_tokens=max_output_tokens,
+                )
+                if stream:
+                    print("\n", flush=True)
+
+                last_response = ch
+                last_word_count = count_words(ch)
+
+                if last_word_count >= CHAPTER_MIN_WORDS:
+                    is_valid, issue = validate_chapter_output(ch)
+                    if not is_valid:
+                        if stream:
+                            print(f"Chapter {i} invalid output: {issue}. Retrying...", flush=True)
+                        attempts += 1
+                        if attempts >= CHAPTER_MAX_ATTEMPTS:
+                            final_text = ch
+                            print(f"Warning: Chapter {i} has {issue} after {CHAPTER_MAX_ATTEMPTS} attempts, using anyway.", file=sys.stderr, flush=True)
+                            break
+                        retry_prompt = (
+                            f"The chapter you just provided has issues: {issue}. "
+                            "Please rewrite entire chapter, ensuring:\n"
+                            "- It ends with proper punctuation (complete sentences)\n"
+                            "- No repetitive phrases or sentences\n"
+                            "- Natural, flowing narrative\n"
+                            "Output only the revised chapter text with no commentary."
+                        )
+                        context_messages.append({"role": "user", "content": retry_prompt})
+                        continue
+                    final_text = ch
+                    break
+
+                attempts += 1
+                if stream:
+                    print(f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).", flush=True)
+
+                if attempts >= CHAPTER_MAX_ATTEMPTS:
+                    break
+
+                retry_prompt = (
+                    f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
+                    f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
+                    "Please rewrite the entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
+                    "Output only the revised chapter text with no commentary."
+                )
+                context_messages.append({"role": "user", "content": retry_prompt})
+
+            if not final_text:
+                final_text = last_response
+
+            if last_word_count < CHAPTER_MIN_WORDS:
+                print(f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).", file=sys.stderr, flush=True)
+            else:
+                print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
         # Auto-review loop: LLM reviews and potentially rewrites chapter
         if always_autogen_chapters:
@@ -1433,50 +1561,94 @@ def run_workflow_v2_resume(
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
         emit_progress(f"Chapter {i}")
 
-        attempts = 0
         final_text = ""
-        last_response = ""
         last_word_count = 0
 
-        while attempts < CHAPTER_MAX_ATTEMPTS:
-            ch = chat_once(
+        if always_autogen_chapters:
+            max_output_tokens = calculate_safe_max_tokens(
+                context_manager.check_context_size(context_messages)["estimated_tokens"],
+                context_manager.max_context_tokens,
+                model
+            )
+            final_text = chat_once(
                 client, model, context_messages,
                 stream=stream, temperature=temperature,
                 on_token=token_handler if stream else None,
                 cache=cache,
+                max_tokens=max_output_tokens,
             )
             if stream:
                 print("\n", flush=True)
-
-            last_response = ch
-            last_word_count = count_words(ch)
-
-            if last_word_count >= CHAPTER_MIN_WORDS:
-                final_text = ch
-                break
-
-            attempts += 1
-            if stream:
-                print(f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).", flush=True)
-
-            if attempts >= CHAPTER_MAX_ATTEMPTS:
-                break
-
-            retry_prompt = (
-                f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
-                f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
-                "Please rewrite the entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
-                "Output only the revised chapter text with no commentary."
-            )
-            context_messages.append({"role": "user", "content": retry_prompt})
-
-        if not final_text:
-            final_text = last_response
-
-        if last_word_count < CHAPTER_MIN_WORDS:
-            print(f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).", file=sys.stderr, flush=True)
-        else:
+            last_word_count = count_words(final_text)
             print(f"Chapter {i} word count: {last_word_count}", flush=True)
+        else:
+            attempts = 0
+            last_response = ""
+
+            while attempts < CHAPTER_MAX_ATTEMPTS:
+                max_output_tokens = calculate_safe_max_tokens(
+                    context_manager.check_context_size(context_messages)["estimated_tokens"],
+                    context_manager.max_context_tokens,
+                    model
+                )
+                ch = chat_once(
+                    client, model, context_messages,
+                    stream=stream, temperature=temperature,
+                    on_token=token_handler if stream else None,
+                    cache=cache,
+                    max_tokens=max_output_tokens,
+                )
+                if stream:
+                    print("\n", flush=True)
+
+                last_response = ch
+                last_word_count = count_words(ch)
+
+                if last_word_count >= CHAPTER_MIN_WORDS:
+                    is_valid, issue = validate_chapter_output(ch)
+                    if not is_valid:
+                        if stream:
+                            print(f"Chapter {i} invalid output: {issue}. Retrying...", flush=True)
+                        attempts += 1
+                        if attempts >= CHAPTER_MAX_ATTEMPTS:
+                            final_text = ch
+                            print(f"Warning: Chapter {i} has {issue} after {CHAPTER_MAX_ATTEMPTS} attempts, using anyway.", file=sys.stderr, flush=True)
+                            break
+                        retry_prompt = (
+                            f"The chapter you just provided has issues: {issue}. "
+                            "Please rewrite entire chapter, ensuring:\n"
+                            "- It ends with proper punctuation (complete sentences)\n"
+                            "- No repetitive phrases or sentences\n"
+                            "- Natural, flowing narrative\n"
+                            "Output only the revised chapter text with no commentary."
+                        )
+                        context_messages.append({"role": "user", "content": retry_prompt})
+                        continue
+                    final_text = ch
+                    break
+
+                attempts += 1
+                if stream:
+                    print(f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).", flush=True)
+
+                if attempts >= CHAPTER_MAX_ATTEMPTS:
+                    break
+
+                retry_prompt = (
+                    f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
+                    f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
+                    "Please rewrite the entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
+                    "Output only the revised chapter text with no commentary."
+                )
+                context_messages.append({"role": "user", "content": retry_prompt})
+
+            if not final_text:
+                final_text = last_response
+
+            if last_word_count < CHAPTER_MIN_WORDS:
+                print(f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).", file=sys.stderr, flush=True)
+            else:
+                print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
         # Feedback loop: allow re-writing chapter based on feedback
         if not always_autogen_chapters:
@@ -1500,11 +1672,17 @@ def run_workflow_v2_resume(
                 rewrite_messages.append({"role": "user", "content": chapter_prompt(i, context_manager.get_previous_chapter_ending(i))})
                 rewrite_messages.append({"role": "user", "content": feedback_prompt})
 
+                max_output_tokens = calculate_safe_max_tokens(
+                    context_manager.check_context_size(rewrite_messages)["estimated_tokens"],
+                    context_manager.max_context_tokens,
+                    model
+                )
                 ch = chat_once(
                     client, model, rewrite_messages,
                     stream=stream, temperature=temperature,
                     on_token=token_handler if stream else None,
                     cache=cache,
+                    max_tokens=max_output_tokens,
                 )
                 if stream:
                     print("\n", flush=True)
@@ -1926,13 +2104,16 @@ def run_workflow_v2(
             print(f"\n=== Chapter {i} (streaming) ===", flush=True)
         emit_progress(f"Chapter {i}")
 
-        attempts = 0
         final_text = ""
-        last_response = ""
         last_word_count = 0
 
-        while attempts < CHAPTER_MAX_ATTEMPTS:
-            ch = chat_once(
+        if always_autogen_chapters:
+            max_output_tokens = calculate_safe_max_tokens(
+                context_manager.check_context_size(context_messages)["estimated_tokens"],
+                context_manager.max_context_tokens,
+                model
+            )
+            final_text = chat_once(
                 client,
                 model,
                 context_messages,
@@ -1940,47 +2121,90 @@ def run_workflow_v2(
                 temperature=temperature,
                 on_token=token_handler if stream else None,
                 cache=cache,
+                max_tokens=max_output_tokens,
             )
             if stream:
                 print("\n", flush=True)
+            last_word_count = count_words(final_text)
+            print(f"Chapter {i} word count: {last_word_count}", flush=True)
+        else:
+            attempts = 0
+            last_response = ""
 
-            last_response = ch
-            # Don't add to context_messages here - let context manager handle it
-            last_word_count = count_words(ch)
+            while attempts < CHAPTER_MAX_ATTEMPTS:
+                max_output_tokens = calculate_safe_max_tokens(
+                    context_manager.check_context_size(context_messages)["estimated_tokens"],
+                    context_manager.max_context_tokens,
+                    model
+                )
+                ch = chat_once(
+                    client,
+                    model,
+                    context_messages,
+                    stream=stream,
+                    temperature=temperature,
+                    on_token=token_handler if stream else None,
+                    cache=cache,
+                    max_tokens=max_output_tokens,
+                )
+                if stream:
+                    print("\n", flush=True)
 
-            if last_word_count >= CHAPTER_MIN_WORDS:
-                final_text = ch
-                break
+                last_response = ch
+                last_word_count = count_words(ch)
 
-            attempts += 1
-            if stream:
+                if last_word_count >= CHAPTER_MIN_WORDS:
+                    is_valid, issue = validate_chapter_output(ch)
+                    if not is_valid:
+                        if stream:
+                            print(f"Chapter {i} invalid output: {issue}. Retrying...", flush=True)
+                        attempts += 1
+                        if attempts >= CHAPTER_MAX_ATTEMPTS:
+                            final_text = ch
+                            print(f"Warning: Chapter {i} has {issue} after {CHAPTER_MAX_ATTEMPTS} attempts, using anyway.", file=sys.stderr, flush=True)
+                            break
+                        retry_prompt = (
+                            f"The chapter you just provided has issues: {issue}. "
+                            "Please rewrite entire chapter, ensuring:\n"
+                            "- It ends with proper punctuation (complete sentences)\n"
+                            "- No repetitive phrases or sentences\n"
+                            "- Natural, flowing narrative\n"
+                            "Output only revised chapter text with no commentary."
+                        )
+                        context_messages.append({"role": "user", "content": retry_prompt})
+                        continue
+                    final_text = ch
+                    break
+
+                attempts += 1
+                if stream:
+                    print(
+                        f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).",
+                        flush=True,
+                    )
+
+                if attempts >= CHAPTER_MAX_ATTEMPTS:
+                    break
+
+                retry_prompt = (
+                    f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
+                    f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
+                    "Please rewrite entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
+                    "Output only the revised chapter text with no commentary."
+                )
+                context_messages.append({"role": "user", "content": retry_prompt})
+
+            if not final_text:
+                final_text = last_response
+
+            if last_word_count < CHAPTER_MIN_WORDS:
                 print(
-                    f"Chapter {i} returned {last_word_count} words (needs >= {CHAPTER_MIN_WORDS}).",
+                    f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).",
+                    file=sys.stderr,
                     flush=True,
                 )
-
-            if attempts >= CHAPTER_MAX_ATTEMPTS:
-                break
-
-            retry_prompt = (
-                f"The chapter you just provided for Chapter {i} contains {last_word_count} words, "
-                f"but it must be at least {CHAPTER_MIN_WORDS} words of narrative prose. "
-                "Please rewrite the entire chapter, keeping continuity with earlier chapters, and expand the storytelling so the final output meets or exceeds the requirement. "
-                "Output only the revised chapter text with no commentary."
-            )
-            context_messages.append({"role": "user", "content": retry_prompt})
-
-        if not final_text:
-            final_text = last_response
-
-        if last_word_count < CHAPTER_MIN_WORDS:
-            print(
-                f"Warning: Chapter {i} final word count {last_word_count} < {CHAPTER_MIN_WORDS} after {CHAPTER_MAX_ATTEMPTS} attempt(s).",
-                file=sys.stderr,
-                flush=True,
-            )
-        else:
-            print(f"Chapter {i} word count: {last_word_count}", flush=True)
+            else:
+                print(f"Chapter {i} word count: {last_word_count}", flush=True)
 
         # Feedback loop: allow re-writing chapter based on feedback
         if not always_autogen_chapters:
@@ -2004,11 +2228,17 @@ def run_workflow_v2(
                 rewrite_messages.append({"role": "user", "content": chapter_prompt(i, context_manager.get_previous_chapter_ending(i))})
                 rewrite_messages.append({"role": "user", "content": feedback_prompt})
 
+                max_output_tokens = calculate_safe_max_tokens(
+                    context_manager.check_context_size(rewrite_messages)["estimated_tokens"],
+                    context_manager.max_context_tokens,
+                    model
+                )
                 ch = chat_once(
                     client, model, rewrite_messages,
                     stream=stream, temperature=temperature,
                     on_token=token_handler if stream else None,
                     cache=cache,
+                    max_tokens=max_output_tokens,
                 )
                 if stream:
                     print("\n", flush=True)

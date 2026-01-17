@@ -1,7 +1,7 @@
 """Tests for word counting and text processing utilities."""
 
 import pytest
-from eq_author import count_words, extract_chapter_ending, strip_injection_markers, strip_thinking_sections
+from eq_author import count_words, extract_chapter_ending, strip_injection_markers, strip_thinking_sections, validate_chapter_output
 
 
 class TestCountWords:
@@ -175,3 +175,92 @@ The story begins here."""
         text = "Thinking...\n\nCHAPTER 5: The End\nContent"
         result = strip_thinking_sections(text)
         assert "CHAPTER 5" in result
+
+
+class TestValidateChapterOutput:
+    """Tests for validate_chapter_output function."""
+
+    def test_valid_chapter(self):
+        """Test that a valid chapter passes validation."""
+        text = """# Chapter 1
+
+The story begins with a young adventurer setting out on a journey. She had prepared for this moment her entire life, training her mind and body for the challenges ahead.
+
+The ancient ruins stood before her, their stone walls covered in moss and time. She took a deep breath and stepped forward into the unknown. The door was heavy, but it opened with a whispered creak.
+
+This was it - the moment she had been searching for her entire life. She knew that whatever lay beyond would change everything."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is True
+        assert issue == ""
+
+    def test_chapter_ends_mid_sentence(self):
+        """Test that a chapter ending mid-sentence fails validation."""
+        text = """# Chapter 1
+
+The story begins with a young adventurer. She had prepared for this moment her entire life
+
+The ancient ruins stood before her"""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is False
+        assert "mid-sentence" in issue.lower()
+
+    def test_repetitive_sentence(self):
+        """Test that repetitive sentences fail validation."""
+        text = """# Chapter 1
+
+The story begins with a young adventurer setting out on a journey. The story begins with a young adventurer setting out on a journey. The story begins with a young adventurer setting out on a journey. The story begins with a young adventurer setting out on a journey. The story begins with a young adventurer setting out on a journey.
+
+The ancient ruins stood before her, their stone walls covered in moss and time. She had prepared for this moment her entire life."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is False
+        assert "repetitive" in issue.lower()
+
+    def test_repetitive_lines(self):
+        """Test that repetitive lines fail validation."""
+        text = """# Chapter 1
+
+He gave her a chance to prove herself.
+He gave her a chance to prove herself.
+He gave her a chance to prove herself.
+
+The ancient ruins stood before her, their stone walls covered in moss and time. She had prepared for this moment her entire life."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is False
+        assert "repetitive" in issue.lower()
+
+    def test_character_repetition(self):
+        """Test that excessive character repetition fails validation."""
+        text = """# Chapter 1
+
+The story begins with aaaaaaaa great adventure. The ancient ruins stood before her.
+
+She had trained for this moment."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is False
+        assert "character repetition" in issue.lower()
+
+    def test_too_short(self):
+        """Test that too-short text fails validation."""
+        text = """# Chapter 1
+
+Short."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is False
+        assert "too short" in issue.lower()
+
+    def test_empty_string(self):
+        """Test that empty string fails validation."""
+        is_valid, issue = validate_chapter_output("")
+        assert is_valid is False
+
+    def test_valid_with_dialogue(self):
+        """Test that valid chapter with dialogue passes."""
+        text = """# Chapter 1
+
+"Are you sure about this?" Sarah asked.
+
+"No," John replied. "But we have no choice."
+
+They pressed forward into the darkness, their flashlights cutting narrow beams through the gloom."""
+        is_valid, issue = validate_chapter_output(text)
+        assert is_valid is True
