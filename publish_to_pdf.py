@@ -600,6 +600,174 @@ def parse_yaml_story(src_path: str) -> Optional[dict]:
 
     return None
 
+def process_chapters_to_pdf(chapters, output_filename='story.pdf', title='My Story'):
+    """
+    Process a list of chapters and create a beautifully formatted PDF Story.
+    """
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed; cannot build PDF. Install requirements or run non-PDF tests only.")
+    # Try to register custom fonts
+    custom_fonts = register_fonts()
+    
+    # Define eye-friendly colors
+    background_color = colors.HexColor('#FBFAF5')  # Softer neutral background
+    text_color = colors.Color(0.133, 0.133, 0.133)  # Soft black
+    
+    class DocumentWithBackground(SimpleDocTemplate):
+        def handle_pageBegin(self):
+            self.canv.saveState()
+            self.canv.setFillColor(background_color)
+            self.canv.rect(0, 0, letter[0], letter[1], fill=1)
+            self.canv.restoreState()
+            super().handle_pageBegin()
+    
+    # Create the PDF document
+    doc = DocumentWithBackground(
+        output_filename,
+        pagesize=letter,
+        rightMargin=1.25*inch,
+        leftMargin=1.25*inch,
+        topMargin=1*inch,
+        bottomMargin=1*inch
+    )
+    
+    # Get styles
+    styles = getSampleStyleSheet()
+    
+    # Create custom styles with appropriate fonts
+    title_style = ParagraphStyle(
+        'StoryTitle',
+        fontName='Cinzel-Bold' if custom_fonts else 'Times-Bold',
+        fontSize=24,
+        spaceAfter=30,
+        alignment=1,
+        leading=36,
+        textColor=text_color
+    )
+    
+    chapter_style = ParagraphStyle(
+        'ChapterTitle',
+        fontName='Cinzel' if custom_fonts else 'Times-Bold',
+        fontSize=18,
+        spaceAfter=30,
+        spaceBefore=30,
+        alignment=1,
+        leading=28,
+        textColor=text_color
+    )
+    
+    body_style = ParagraphStyle(
+        'StoryBody',
+        fontName='CrimsonText' if custom_fonts else 'Times-Roman',
+        fontSize=12,
+        leading=18,
+        spaceAfter=12,
+        firstLineIndent=24,
+        alignment=0,
+        textColor=text_color
+    )
+
+    list_item_style = ParagraphStyle(
+        'StoryListItem',
+        parent=body_style,
+        firstLineIndent=0,
+        leftIndent=18,
+        spaceBefore=0,
+        spaceAfter=6,
+    )
+
+    blockquote_style = ParagraphStyle(
+        'StoryBlockQuote',
+        parent=body_style,
+        leftIndent=24,
+        rightIndent=12,
+        firstLineIndent=0,
+        spaceBefore=12,
+        spaceAfter=12,
+        textColor=colors.Color(0.25, 0.25, 0.25)
+    )
+
+    code_style = ParagraphStyle(
+        'StoryCodeBlock',
+        parent=body_style,
+        fontName='Courier',
+        fontSize=10,
+        leading=14,
+        firstLineIndent=0,
+        leftIndent=18,
+        backColor=colors.Color(0.95, 0.95, 0.92),
+        spaceBefore=6,
+        spaceAfter=12,
+    )
+
+    heading_styles = {
+        1: ParagraphStyle(
+            'StoryHeading1',
+            parent=body_style,
+            fontName=chapter_style.fontName,
+            fontSize=16,
+            leading=24,
+            firstLineIndent=0,
+            spaceBefore=18,
+            spaceAfter=12,
+        ),
+        2: ParagraphStyle(
+            'StoryHeading2',
+            parent=body_style,
+            fontName=chapter_style.fontName,
+            fontSize=14,
+            leading=20,
+            firstLineIndent=0,
+            spaceBefore=16,
+            spaceAfter=10,
+        ),
+        3: ParagraphStyle(
+            'StoryHeading3',
+            parent=body_style,
+            fontName=chapter_style.fontName,
+            fontSize=13,
+            leading=18,
+            firstLineIndent=0,
+            spaceBefore=14,
+            spaceAfter=8,
+        ),
+    }
+    
+    # Store the elements that will make up our document
+    elements = []
+    
+    # Add title page
+    elements.append(Spacer(1, 3*inch))
+    elements.append(Paragraph(xml_escape(title), title_style))
+    elements.append(PageBreak())
+    
+    # Process each chapter
+    for i, (chapter_title, content) in enumerate(chapters, 1):
+        # Add chapter title with proper spacing
+        elements.append(Spacer(1, inch))
+        elements.append(Paragraph(xml_escape(chapter_title), chapter_style))
+        elements.append(Spacer(1, 0.5*inch))
+
+        # Process chapter content
+        if content:
+            chapter_flowables = build_flowables_from_markdown(
+                content,
+                body_style=body_style,
+                list_item_style=list_item_style,
+                code_style=code_style,
+                blockquote_style=blockquote_style,
+                heading_styles=heading_styles,
+            )
+            elements.extend(chapter_flowables)
+        
+        # Add page break after each chapter
+        elements.append(PageBreak())
+    
+    # Build the PDF document
+    doc.build(elements)
+    
+    return output_filename
+
 def process_story_to_pdf(input_text, output_filename='story.pdf', title='My Story'):
     """
     Process text into chapters and create a beautifully formatted PDF Story.
@@ -762,14 +930,10 @@ def process_story_to_pdf(input_text, output_filename='story.pdf', title='My Stor
         elements.append(Paragraph(xml_escape(chapter_title), chapter_style))
         elements.append(Spacer(1, 0.5*inch))
 
-        # Process chapter content - strip any chapter heading that might be in the body
+        # Process chapter content
         if content:
-            # Remove chapter heading patterns from content to prevent double-titling
-            content_clean = re.sub(r'(?im)^#{1,6}\s*chapter\s+[^\n]*\n*', '', content)
-            content_clean = re.sub(r'(?im)^chapter\s+[^\n]*\n*', '', content_clean)
-            
             chapter_flowables = build_flowables_from_markdown(
-                clean_text(content_clean, preserve_markup=True),
+                clean_text(content, preserve_markup=True),
                 body_style=body_style,
                 list_item_style=list_item_style,
                 code_style=code_style,
@@ -834,7 +998,7 @@ if __name__ == "__main__":
             sys.exit(2)
 
         matches.sort(key=lambda t: t[0])
-        parts: List[str] = []
+        chapters: List[tuple] = []
         for num, fname in matches:
             fpath = os.path.join(src, fname)
             try:
@@ -844,10 +1008,16 @@ if __name__ == "__main__":
                 print(f"Failed to read chapter file '{fname}': {e}")
                 sys.exit(1)
             content = collapse_duplicate_newlines(content)
-            # Build a combined text that our splitter understands
-            parts.append(f"Chapter {num}\n\n{content}\n")
+            # Remove all chapter headings from individual files to prevent double-titling
+            content = re.sub(r'(?im)^#{1,6}\s*chapter\s+[^\n]*\n*', '', content)
+            content = re.sub(r'(?im)^\*\*chapter\s+[^\n]*\*\*\n*', '', content)
+            content = re.sub(r'(?im)^chapter\s+[^\n]*\n*', '', content)
+            content = clean_text(content, preserve_markup=True)
+            
+            # Create chapter title from filename number
+            chapter_title = f"Chapter {num}"
+            chapters.append((chapter_title, content))
 
-        input_text = collapse_duplicate_newlines("\n\n".join(parts))
         doc_title = args.title.strip()
 
         # Determine output path defaults for directory case
@@ -859,10 +1029,8 @@ if __name__ == "__main__":
             safe_name = f"{doc_title}.pdf"
             out_path = os.path.join(out_dir, safe_name)
 
-        # Basic cleanup used previously
-        input_text = clean_text(collapse_duplicate_newlines(input_text), preserve_markup=True)
-
-        out_file = process_story_to_pdf(input_text, out_path, doc_title)
+        # Process chapters directly instead of going through parse_markdown_chapters
+        out_file = process_chapters_to_pdf(chapters, out_path, doc_title)
         print(f"Story saved to {out_file}")
         sys.exit(0)
 
@@ -879,8 +1047,11 @@ if __name__ == "__main__":
             chapters = story_from_yaml['chapters']
             contents: List[str] = []
             for ch_title, ch_text in chapters:
-                # Ensure we mark the chapter for the splitter
-                contents.append(f"Chapter {ch_title}\n\n{ch_text}\n")
+                # Remove all chapter headings from individual files to prevent double-titling
+                ch_text = re.sub(r'(?im)^#{1,6}\s*chapter\s+[^\n]*\n*', '', ch_text)
+                ch_text = re.sub(r'(?im)^\*\*chapter\s+[^\n]*\*\*\n*', '', ch_text)
+                ch_text = re.sub(r'(?im)^chapter\s+[^\n]*\n*', '', ch_text)
+                contents.append(f"{ch_text}\n")
             input_text = collapse_duplicate_newlines("\n\n".join(contents))
             doc_title = story_from_yaml.get('doc_title')
         else:
@@ -899,6 +1070,11 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Failed to read source file: {e}")
             sys.exit(1)
+        
+        # Remove all chapter headings from single file to prevent double-titling
+        input_text = re.sub(r'(?im)^#{1,6}\s*chapter\s+[^\n]*\n*', '', input_text)
+        input_text = re.sub(r'(?im)^\*\*chapter\s+[^\n]*\*\*\n*', '', input_text)
+        input_text = re.sub(r'(?im)^chapter\s+[^\n]*\n*', '', input_text)
 
     # Basic cleanup used previously
     input_text = clean_text(collapse_duplicate_newlines(input_text), preserve_markup=True)
