@@ -1,14 +1,17 @@
 """Workflow for resuming from a previous run."""
 
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Optional, Callable, List, Dict
 
-from .api import make_client, PromptCache
+from .api import make_client, PromptCache, chat_once
 from .context import ContextManager
 from .progress import detect_progress, load_existing_context
 from .file_io import write_chapter_output
 from .prompts import chapter_prompt
 from .constants import DEFAULT_SUMMARY_LENGTH
+from .chapter import generate_chapter_summary
+from .text_utils import extract_chapter_ending
+from .model_helpers import get_default_max_context_tokens
 from .workflow_utils import (
     _setup_callbacks,
     _generate_chapter_auto,
@@ -16,9 +19,28 @@ from .workflow_utils import (
     _auto_review_chapter,
     _apply_feedback_rewrite,
 )
-from .model_helpers import calculate_safe_max_tokens, get_default_max_context_tokens
-from .chapter import generate_chapter_summary
-from .text_utils import extract_chapter_ending
+
+
+def load_chapter_context(out_dir: Path) -> List[Dict[str, str]]:
+    """Load only steps 2 (characters) and 5 (final plan) for chapter context."""
+    from .constants import STEP_FILENAMES
+    
+    context = []
+    context.append({"role": "system", "content": "You are a helpful assistant"})
+    
+    # Load step 2: Characters
+    char_file = out_dir / STEP_FILENAMES[2]
+    if char_file.exists():
+        char_content = char_file.read_text(encoding="utf-8")
+        context.append({"role": "assistant", "content": char_content})
+    
+    # Load step 5: Final Plan  
+    plan_file = out_dir / STEP_FILENAMES[5]
+    if plan_file.exists():
+        plan_content = plan_file.read_text(encoding="utf-8")
+        context.append({"role": "assistant", "content": plan_content})
+    
+    return context
 
 
 def run_workflow_v2_resume(
@@ -78,8 +100,34 @@ def run_workflow_v2_resume(
 
     context_manager.add_core_context(messages)
 
+    # Check for prologue in Step 5 (messages is loaded from steps 1-5 + chapters)
+    # The messages list contains system, steps 1-5, then chapters.
+    # Step 5 is at index 5 (system is 0, steps 1-5 are 1-5).
+    # But load_existing_context might vary if steps are missing (unlikely in resume).
+    # Safer to check file directly.
+    start_chapter = 1
+    from .constants import STEP_FILENAMES
+    step5_file = out_dir / STEP_FILENAMES.get(5, "05_final_plan.md")
+    
+    if step5_file.exists():
+        try:
+            step5_content = step5_file.read_text(encoding="utf-8")
+            from .text_utils import has_prologue
+            if has_prologue(step5_content):
+                start_chapter = 0
+                print("Prologue detected in plan. Will generate Prologue as Chapter 0.", flush=True)
+        except Exception:
+            pass
+    elif len(messages) >= 6:
+        # Fallback to messages
+        from .text_utils import has_prologue
+        if has_prologue(messages[5].get("content", "")):
+             start_chapter = 0
+             print("Prologue detected in plan (context). Will generate Prologue as Chapter 0.", flush=True)
+
     if last_chapter > 0:
-        for i in range(1, last_chapter + 1):
+        for i in range(start_chapter, last_chapter + 1):
+            if i < 1 and start_chapter > i: continue # Just safety
             chapter_file = out_dir / "chapters" / f"chapter_{i:02d}.md"
             summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
 
@@ -116,9 +164,37 @@ def run_workflow_v2_resume(
 
     context_manager.add_core_context(messages)
 
-    for i in range(last_chapter + 1, n_chapters + 1):
-        previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
-        context_messages = context_manager.build_context(i)
+    # Determine next chapter index
+    # Resume logic:
+    # If last_chapter is 0 (found nothing or found chapter_00), next is last_chapter + 1?
+    # Wait, if detect_progress found chapter_00.md, last_chapter would be 0?
+    # detect_progress logic: int(f.name[8:10]). So chapter_00 -> 0.
+    # If chapters_dir has only chapter_00.md, max_chapter = 0.
+    # If chapters_dir is empty, max_chapter = 0.
+    
+    # If max_chapter is 0, we need to check if chapter_00.md exists to distinguish "done prologue" from "done nothing".
+    next_chapter_index = last_chapter + 1
+    if start_chapter == 0 and last_chapter == 0:
+        if not (out_dir / "chapters" / "chapter_00.md").exists():
+            next_chapter_index = 0
+            
+    print(f"Resuming generation from Chapter {next_chapter_index}")
+
+    for i in range(next_chapter_index, n_chapters + 1):
+        previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > start_chapter else ""
+        # Load only characters (step 2) and final plan (step 5) for chapter context
+        chapter_base_context = load_chapter_context(out_dir)
+        # Add chapter summaries from previous chapters
+        chapter_context = chapter_base_context.copy()
+        if i > start_chapter:
+            # Add summaries from all previous chapters
+            for summary_info in context_manager.chapter_summaries:
+                chapter_context.append({
+                    "role": "assistant",
+                    "content": f"Chapter {summary_info['chapter']} Summary:\n{summary_info['summary']}",
+                })
+        
+        context_messages = chapter_context
         context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
 
         context_status = context_manager.check_context_size(context_messages)
@@ -142,8 +218,26 @@ def run_workflow_v2_resume(
 
         if always_autogen_chapters:
             final_text, last_word_count = _auto_review_chapter(
-                client, model, i, final_text, context_manager, out_dir, stream, temperature, cache
+                client, model, i, final_text, context_manager, out_dir, stream, temperature, cache, token_handler
             )
+        else:
+            feedback_loop_count = 0
+            max_feedback_loops = 3
+            while feedback_loop_count < max_feedback_loops:
+                fb = maybe_collect_feedback(f"chapter {i}")
+                if not fb:
+                    # User skipped manual feedback, apply auto-review
+                    print(f"Manual feedback skipped. Running auto-review for Chapter {i}...", flush=True)
+                    final_text, last_word_count = _auto_review_chapter(
+                        client, model, i, final_text, context_manager, out_dir, stream, temperature, cache, token_handler
+                    )
+                    break
+
+                # Manual feedback provided
+                final_text, last_word_count = _apply_feedback_rewrite(
+                    client, model, i, context_manager, final_text, fb, stream, temperature, cache, token_handler, emit_progress
+                )
+                feedback_loop_count += 1
 
         write_chapter_output(out_dir, i, final_text)
 
@@ -151,14 +245,11 @@ def run_workflow_v2_resume(
 
         if stream:
             print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-        chapter_summary = generate_chapter_summary(client, model, final_text, i, summary_length, stream, temperature, cache)
+        chapter_summary = generate_chapter_summary(client, model, final_text, i, summary_length, stream, temperature, cache, token_handler)
 
         summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
         summary_file.write_text(chapter_summary, encoding="utf-8")
 
         context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
 
-        if not always_autogen_chapters:
-            fb = maybe_collect_feedback(f"chapter {i}")
-            if fb:
-                context_messages.append({"role": "user", "content": f"FEEDBACK AFTER CHAPTER {i}:\n{fb}\nPlease apply this feedback in the next chapter(s)."})
+

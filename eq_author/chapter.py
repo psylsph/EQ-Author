@@ -16,6 +16,7 @@ def generate_chapter_summary(
     stream: bool = False,
     temperature = None,
     cache = None,
+    on_token = None,
 ) -> str:
     """Generate a concise summary of a chapter for context management."""
 
@@ -35,7 +36,7 @@ def generate_chapter_summary(
         {"role": "user", "content": summary_prompt},
     ]
 
-    summary = chat_once(client, model, messages, stream=stream, temperature=temperature, cache=cache)
+    summary = chat_once(client, model, messages, stream=stream, temperature=temperature, cache=cache, on_token=on_token)
     return summary.strip()
 
 
@@ -48,6 +49,7 @@ def auto_review_chapter(
     stream: bool = False,
     temperature = None,
     cache = None,
+    on_token = None,
 ) -> Tuple[str, str, bool]:
     """Have the LLM review and optionally rewrite a chapter.
 
@@ -55,91 +57,87 @@ def auto_review_chapter(
     - llm_approved: True if LLM says the chapter is acceptable (final authority)
 
     The LLM's judgment overrides the word count check. If the LLM says
-    the chapter is good quality (even if under 2500 words), it will be approved.
+    the chapter is good quality (even if under 2000 words), it will be approved.
     """
     word_count = count_words(chapter_text)
 
-    review_prompt = f"""You are an expert book editor reviewing Chapter {chapter_num} of a novel.
+    review_prompt = f"""You are a ruthlessly critical book editor reviewing Chapter {chapter_num} of a novel.
+You have high standards for literary fiction and thriller pacing. You despise "AI-slop" (repetitive phrasing, bland descriptions, lack of subtext).
 
-The chapter has {word_count} words (target: {CHAPTER_MIN_WORDS}+, but quality matters more than length).
+The chapter has {word_count} words (target: {CHAPTER_MIN_WORDS}+).
 
-Please review thoroughly and determine if the chapter is acceptable as-is or needs improvement.
+Please review thoroughly. Be harsh. Look for:
+1. **Show, Don't Tell**: Does the author explain emotions instead of showing them?
+2. **Dialogue**: Is it on-the-nose? Do characters say exactly what they mean (bad) or is there subtext (good)?
+3. **Pacing**: Does the scene drag? Is there unnecessary exposition?
+4. **Repetition**: Are words or sentence structures repeated? (e.g., starting every sentence with "He" or "She")
+5. **Logic**: Do character actions make sense?
 
 {('Previous chapter ended: ' + previous_chapter_ending) if previous_chapter_ending else 'No previous chapter context (this is chapter 1).'}
 
-Evaluate:
-1. **Narrative Flow**: Is the story engaging and well-paced?
-2. **Character Consistency**: Are characters consistent and believable?
-3. **Dialogue Quality**: Is dialogue natural and purposeful?
-4. **Scene Description**: Are scenes vivid and immersive?
-5. **Pacing**: Does the chapter maintain good momentum?
-6. **Continuity**: Does it flow naturally from the previous chapter?
-7. **Completeness**: Does it accomplish its narrative purpose?
-
-IMPORTANT: A chapter under {CHAPTER_MIN_WORDS} words can still be APPROVED if:
-- It tells a complete, satisfying story segment
-- Quality of prose is excellent
-- It serves its narrative purpose well
-- It's not unnecessarily short
-
 OUTPUT YOUR REVIEW IN THIS FORMAT:
 ```
-## Quality Assessment
+## Critical Assessment
 - Word Count: X (target: {CHAPTER_MIN_WORDS}+)
 - Narrative Flow: X/5
-- Character Consistency: X/5
-- Dialogue Quality: X/5
-- Scene Description: X/5
-- Pacing: X/5
+- Dialogue Authenticity: X/5
+- "Show, Don't Tell": X/5
+- Pacing & Tension: X/5
+- Prose Quality (avoiding repetition): X/5
 - Overall: X/5
 
 ## Verdict
-ACCEPTABLE (chapter meets quality standards) - No rewrite needed
+ACCEPTABLE (Only if it's high quality and needs no major changes)
 OR
-NEEDS_IMPROVEMENT (specific issues listed below)
+NEEDS_IMPROVEMENT (If any of the above scores are below 4/5, or if significant issues exist)
 
-## Review Notes
-[Your detailed review of what's working, what could be better, and why you made your verdict]
+## Critical Notes
+[Bulleted list of SPECIFIC flaws. Quote specific sentences that are bad. Be direct.]
 
 ## Rewrite Recommendation
-ACCEPTABLE or NEEDS_IMPROVEMENT
+[If NEEDS_IMPROVEMENT: rewrite the ENTIRE chapter below.
+CRITICAL INSTRUCTIONS FOR REWRITE:
+1. **RETAIN LENGTH**: You must output a full chapter of similar length ({word_count} words or more). DO NOT SUMMARIZE.
+2. **RETAIN PLOT**: Keep all plot points and events. Do not change the story, only the execution.
+3. **FIX STYLE**: Apply your critical notes (fix dialogue, show don't tell, vary sentence structure).
+4. **OUTPUT FULL TEXT**: Provide the complete, polished text ready for publication.]
 
-[If NEEDS_IMPROVEMENT: Provide the rewritten chapter below, keeping continuity and improving the identified issues]
-[If ACCEPTABLE: Just output "ACCEPTABLE - Chapter approved as-is" for the chapter text]
+[If ACCEPTABLE: Just output "ACCEPTABLE - Chapter approved as-is"]
 ```
 
-Remember: Your judgment is final. Approve good chapters even if they're shorter than the target. Rewrite only if there are significant quality issues.
-
-Chapter to review:
+Chapter Text to Review:
 {chapter_text}
 """
 
     messages = [
         {
             "role": "system",
-            "content": "You are a professional book editor. Your judgment is final - approve good chapters even if they're shorter than the target. Only recommend rewrite for significant quality issues.",
+            "content": "You are a critical, high-standards book editor. You rarely approve a first draft. You hate cliche and repetitive AI writing styles.",
         },
         {"role": "user", "content": review_prompt},
     ]
 
-    review = chat_once(client, model, messages, stream=stream, temperature=temperature, cache=cache)
+    review = chat_once(client, model, messages, stream=stream, temperature=temperature, cache=cache, on_token=on_token)
 
     upper_review = review.upper()
     is_acceptable = (
         "VERDICT" in upper_review
         and "ACCEPTABLE" in upper_review
-        and "NEEDS_IMPROVEMENT" not in upper_review[: upper_review.find("VERDICT") + 50]
+        and "NEEDS_IMPROVEMENT" not in upper_review[upper_review.find("VERDICT"):upper_review.find("VERDICT") + 100]
     ) or "ACCEPTABLE - CHAPTER APPROVED" in upper_review
+
+    # Check specifically for NEEDS_IMPROVEMENT in the Verdict section
+    verdict_pos = upper_review.find("VERDICT")
     is_needs_improvement = (
-        "NEEDS_IMPROVEMENT" in upper_review
-        and "ACCEPTABLE" not in upper_review[: upper_review.find("NEEDS_IMPROVEMENT") + 50]
+        "NEEDS_IMPROVEMENT" in upper_review[verdict_pos:]
     )
 
-    if "RECOMMENDATION" in upper_review:
-        recap_start = upper_review.find("RECOMMENDATION")
+    if "REWRITE RECOMMENDATION" in upper_review:
+        recap_start = upper_review.find("REWRITE RECOMMENDATION")
         recap_section = upper_review[recap_start:recap_start + 200]
-        is_acceptable = is_acceptable or "ACCEPTABLE" in recap_section
-        is_needs_improvement = is_needs_improvement or "NEEDS_IMPROVEMENT" in recap_section
+        # If recommendation section mentions acceptable, it overrides?
+        # But if verdict said needs improvement, we should respect that.
+        pass
 
     if is_acceptable and not is_needs_improvement:
         return review, chapter_text, True
@@ -152,7 +150,7 @@ Chapter to review:
             line_upper = line.upper()
             if "ACCEPTABLE" in line_upper and "CHAPTER APPROVED" in line_upper:
                 break
-            if "RECOMMENDATION" in line_upper:
+            if "REWRITE RECOMMENDATION" in line_upper:
                 if "ACCEPTABLE" in line_upper:
                     break
                 else:
@@ -163,6 +161,14 @@ Chapter to review:
         rewritten_text = "\n".join(rewritten_parts).strip()
         if not rewritten_text or len(rewritten_text) < 100:
             rewritten_text = chapter_text
+        
+        # Safety check: if rewrite is significantly shorter (< 70% of original), discard it
+        new_wc = count_words(rewritten_text)
+        original_wc = count_words(chapter_text)
+        if original_wc > 500 and new_wc < (original_wc * 0.7):
+            print(f"Warning: Auto-rewrite was too short ({new_wc} words vs {original_wc}). Discarding rewrite.", flush=True)
+            return review + "\n\n[NOTE: Rewrite discarded because it was too short]", chapter_text, False
+
         return review, rewritten_text, False
 
     return review, chapter_text, True

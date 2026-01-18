@@ -105,6 +105,10 @@ def collect_feedback(step_label: str) -> str:
     try:
         print(f"\nProvide feedback for {step_label} (press Enter to skip):")
         fb = input().strip()
+        if not fb:
+            print("No feedback provided. Skipping...", flush=True)
+        else:
+            print("Feedback received. Processing...", flush=True)
         return fb
     except KeyboardInterrupt:
         print("\nSkipping feedback.")

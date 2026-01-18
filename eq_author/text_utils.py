@@ -13,6 +13,14 @@ def count_words(text: str) -> int:
     return len(re.findall(WORD_RE_PATTERN, text))
 
 
+def has_prologue(plan_text: str) -> bool:
+    """Check if the plan contains a prologue section."""
+    if not plan_text:
+        return False
+    lower = plan_text.lower()
+    return "# prologue" in lower or "## prologue" in lower or "prologue:" in lower
+
+
 def extract_chapter_ending(chapter_text: str, max_sentences: int = 2) -> str:
     """Extract last 1-2 sentences from a chapter to track ending."""
     sentences = re.split(r'(?<=[.!?])\s+', chapter_text.strip())
@@ -34,9 +42,11 @@ def validate_chapter_output(text: str) -> Tuple[bool, str]:
     issues = []
 
     last_char = stripped[-1]
-    if last_char not in '.!?)"\'':
+    # Allow standard and smart quotes
+    allowed_punct = '.!?)"\'”’'
+    if last_char not in allowed_punct:
         last_words = stripped.split()[-5:] if stripped.split() else []
-        if last_words and not any(w[-1] in '.!?)"\'' for w in last_words if len(w) > 1):
+        if last_words and not any(w[-1] in allowed_punct for w in last_words if len(w) > 1):
             issues.append("Chapter ends mid-sentence (no terminal punctuation)")
 
     words = stripped.split()

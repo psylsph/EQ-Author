@@ -7,12 +7,12 @@ from typing import List
 from dotenv import load_dotenv
 
 from .cli import parse_args
-from .api import make_client
+from .api import make_client, PromptCache
 from .workflow_v2 import run_workflow_v2
 from .workflow_skip_planning import run_workflow_v2_skip_planning
 from .workflow_resume import run_workflow_v2_resume
 from .model_helpers import get_default_temperature
-from typing import Optional, Callable
+from .file_io import load_story_prompt, ensure_output_dir
 
 
 def _get_api_key() -> str:
@@ -23,7 +23,6 @@ def _get_api_key() -> str:
 
 def _get_cache(no_cache: bool, cache_dir: str) -> object:
     """Initialize prompt cache if enabled."""
-    from .api import PromptCache
     if no_cache:
         return None
     if not cache_dir:
@@ -33,9 +32,6 @@ def _get_cache(no_cache: bool, cache_dir: str) -> object:
     except Exception as exc:
         print(f"Warning: prompt cache disabled ({exc})")
         return None
-
-
-def main(argv: List[str]) -> int:
 
 
 def main(argv: List[str]) -> int:
@@ -90,11 +86,6 @@ def main(argv: List[str]) -> int:
         return 2
 
     try:
-        from .file_io import load_story_prompt, ensure_output_dir
-    except Exception:
-        pass
-
-    try:
         story_prompt = load_story_prompt(args.story_file, args.story_text)
     except Exception as e:
         print(f"Error loading story prompt: {e}", file=sys.stderr)
@@ -110,7 +101,6 @@ def main(argv: List[str]) -> int:
 
     try:
         if args.skip_planning:
-            from .workflow_skip_planning import run_workflow_v2_skip_planning
             run_workflow_v2_skip_planning(
                 api_key=api_key,
                 base_url=args.base_url,
@@ -155,25 +145,6 @@ def main(argv: List[str]) -> int:
 
     print("Done.")
     return 0
-
-
-def _get_api_key() -> str:
-    """Get API key from environment variables."""
-    import os
-    return os.getenv("EQ_AUTHOR_API_KEY") or os.getenv("API_KEY") or os.getenv("OPENAI_API_KEY") or ""
-
-
-def _get_cache(no_cache: bool, cache_dir: str) -> object:
-    """Initialize prompt cache if enabled."""
-    if no_cache:
-        return None
-    if not cache_dir:
-        return None
-    try:
-        return PromptCache(Path(cache_dir))
-    except Exception as exc:
-        print(f"Warning: prompt cache disabled ({exc})")
-        return None
 
 
 if __name__ == "__main__":

@@ -21,6 +21,28 @@ from .workflow_utils import (
 )
 
 
+def load_chapter_context(out_dir: Path) -> List[Dict[str, str]]:
+    """Load only steps 2 (characters) and 5 (final plan) for chapter context."""
+    from .constants import STEP_FILENAMES
+    
+    context = []
+    context.append({"role": "system", "content": "You are a helpful assistant"})
+    
+    # Load step 2: Characters
+    char_file = out_dir / STEP_FILENAMES[2]
+    if char_file.exists():
+        char_content = char_file.read_text(encoding="utf-8")
+        context.append({"role": "assistant", "content": char_content})
+    
+    # Load step 5: Final Plan  
+    plan_file = out_dir / STEP_FILENAMES[5]
+    if plan_file.exists():
+        plan_content = plan_file.read_text(encoding="utf-8")
+        context.append({"role": "assistant", "content": plan_content})
+    
+    return context
+
+
 def run_workflow_v2(
     api_key: str,
     base_url: str,
@@ -135,7 +157,7 @@ def run_workflow_v2(
     step_texts = build_followup_prompts(final_count)
 
     for step_num in range(2, 6):
-        step_label = {2: "Intention & Chapter Planning", 3: "Human vs LLM Critique", 4: "Final Plan", 5: "Characters"}[step_num]
+        step_label = {2: "Characters", 3: "Intention & Chapter Planning", 4: "Human vs LLM Critique", 5: "Final Plan"}[step_num]
         messages.append({"role": "user", "content": step_texts[step_num - 2]})
         if stream:
             print(f"\n=== Step {step_num}: {step_label} (streaming) ===", flush=True)
@@ -162,9 +184,30 @@ def run_workflow_v2(
 
     context_manager.add_core_context(messages)
 
-    for i in range(1, final_count + 1):
-        previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > 1 else ""
-        context_messages = context_manager.build_context(i)
+    # Check for prologue in Final Plan (Step 5)
+    start_chapter = 1
+    # messages[-1] is the last assistant message, which should be Step 5 output in the loop above
+    # Or explicitly check the file content if we want to be safe
+    from .text_utils import has_prologue
+    if has_prologue(messages[-1].get("content", "")):
+        start_chapter = 0
+        print("Prologue detected in plan. Will generate Prologue as Chapter 0.", flush=True)
+
+    for i in range(start_chapter, final_count + 1):
+        previous_chapter_ending = context_manager.get_previous_chapter_ending(i) if i > start_chapter else ""
+        # Load only characters (step 2) and final plan (step 5) for chapter context
+        chapter_base_context = load_chapter_context(out_dir)
+        # Add chapter summaries from previous chapters
+        chapter_context = chapter_base_context.copy()
+        if i > start_chapter:
+            # Add summaries from all previous chapters
+            for summary_info in context_manager.chapter_summaries:
+                chapter_context.append({
+                    "role": "assistant",
+                    "content": f"Chapter {summary_info['chapter']} Summary:\n{summary_info['summary']}",
+                })
+        
+        context_messages = chapter_context
         context_messages.append({"role": "user", "content": chapter_prompt(i, previous_chapter_ending)})
 
         context_status = context_manager.check_context_size(context_messages)
@@ -192,8 +235,14 @@ def run_workflow_v2(
             while feedback_loop_count < max_feedback_loops:
                 fb = maybe_collect_feedback(f"chapter {i}")
                 if not fb:
+                    # User skipped manual feedback, run auto-review
+                    print(f"Manual feedback skipped. Running auto-review for Chapter {i}...", flush=True)
+                    final_text, last_word_count = _auto_review_chapter(
+                        client, model, i, final_text, context_manager, out_dir, stream, temperature, cache
+                    )
                     break
 
+                # Manual feedback provided
                 final_text, last_word_count = _apply_feedback_rewrite(
                     client, model, i, context_manager, final_text, fb, stream, temperature, cache, token_handler, emit_progress
                 )
@@ -201,8 +250,26 @@ def run_workflow_v2(
 
         if always_autogen_chapters:
             final_text, last_word_count = _auto_review_chapter(
-                client, model, i, final_text, context_manager, out_dir, stream, temperature, cache
+                client, model, i, final_text, context_manager, out_dir, stream, temperature, cache, token_handler
             )
+        else:
+            feedback_loop_count = 0
+            max_feedback_loops = 3
+            while feedback_loop_count < max_feedback_loops:
+                fb = maybe_collect_feedback(f"chapter {i}")
+                if not fb:
+                    # User skipped manual feedback, apply auto-review
+                    print(f"Manual feedback skipped. Running auto-review for Chapter {i}...", flush=True)
+                    final_text, last_word_count = _auto_review_chapter(
+                        client, model, i, final_text, context_manager, out_dir, stream, temperature, cache, token_handler
+                    )
+                    break
+
+                # Manual feedback provided
+                final_text, last_word_count = _apply_feedback_rewrite(
+                    client, model, i, context_manager, final_text, fb, stream, temperature, cache, token_handler, emit_progress
+                )
+                feedback_loop_count += 1
 
         write_chapter_output(out_dir, i, final_text)
 
@@ -210,14 +277,9 @@ def run_workflow_v2(
 
         if stream:
             print(f"\n=== Generating Chapter {i} Summary ===", flush=True)
-        chapter_summary = generate_chapter_summary(client, model, final_text, i, summary_length, stream, temperature, cache)
+        chapter_summary = generate_chapter_summary(client, model, final_text, i, summary_length, stream, temperature, cache, token_handler)
 
         summary_file = out_dir / "chapters" / f"chapter_{i:02d}_summary.md"
         summary_file.write_text(chapter_summary, encoding="utf-8")
 
         context_manager.add_chapter(i, final_text, chapter_summary, chapter_ending)
-
-        if not always_autogen_chapters:
-            fb = maybe_collect_feedback(f"chapter {i}")
-            if fb:
-                context_messages.append({"role": "user", "content": f"FEEDBACK AFTER CHAPTER {i}:\n{fb}\nPlease apply this feedback in the next chapter(s)."})

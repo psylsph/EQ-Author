@@ -30,7 +30,7 @@ class TestAutoReviewChapter:
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = """## Review
-- Word count: 2500
+- Word count: 2000
 - Rating: 4/5
 - Issues: None
 
@@ -115,7 +115,7 @@ NO REWRITE NEEDED"""
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = """## Review
-- Word count: 2500
+- Word count: 2000
 - Rating: 4/5
 - Issues: None
 
@@ -145,7 +145,7 @@ NO REWRITE NEEDED"""
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = """## Review
-- Word count: 2500
+- Word count: 2000
 - Rating: 4/5
 - Issues: None
 
@@ -228,7 +228,7 @@ NO REWRITE NEEDED"""
         mock_response = Mock()
         mock_response.choices = [Mock()]
         mock_response.choices[0].message.content = """## Quality Assessment
-- Word Count: 1500 (target: 2500+)
+- Word Count: 1500 (target: 2000+)
 - Narrative Flow: 2/5
 - Character Consistency: 3/5
 - Dialogue Quality: 3/5

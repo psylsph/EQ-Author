@@ -77,7 +77,7 @@ def _generate_chapter_interactive(
     cache: Optional[PromptCache],
     token_handler: Optional[Callable[[str], None]],
     emit_progress: Callable[[str], None],
-    maybe_collect_feedback: Optional[Callable[[str], str]],
+    maybe_collect_feedback: Optional[Callable[[str], Optional[str]]],
 ) -> tuple[str, int]:
     """Generate a chapter in interactive mode (with retry loop)."""
     attempts = 0
@@ -166,6 +166,7 @@ def _auto_review_chapter(
     stream: bool,
     temperature: Optional[float],
     cache: Optional[PromptCache],
+    token_handler: Optional[Callable[[str], None]] = None,
 ) -> tuple[str, int]:
     """Auto-review a chapter and potentially rewrite."""
     print(f"\n=== Auto-Reviewing Chapter {chapter_num} ===", flush=True)
@@ -177,8 +178,10 @@ def _auto_review_chapter(
     while review_count < max_auto_reviews and not llm_approved:
         previous_ending = context_manager.get_previous_chapter_ending(chapter_num) if chapter_num > 1 else ""
         review_notes, reviewed_text, llm_approved = auto_review_chapter(
-            client, model, final_text, chapter_num, previous_ending, stream, temperature, cache
+            client, model, final_text, chapter_num, previous_ending, stream, temperature, cache, on_token=token_handler
         )
+        if stream:
+            print("\n", flush=True)
 
         from .file_io import write_chapter_output
         review_file = out_dir / "chapters" / f"chapter_{chapter_num:02d}_review.md"
@@ -209,9 +212,10 @@ def _apply_feedback_rewrite(
     temperature: Optional[float],
     cache: Optional[PromptCache],
     token_handler: Optional[Callable[[str], None]],
-    emit_progress: Callable[[str], None]],
+    emit_progress: Callable[[str], None],
 ) -> tuple[str, int]:
     """Apply user feedback and rewrite chapter."""
+    last_word_count = count_words(final_text)
     feedback_prompt = (
         f"Please rewrite Chapter {chapter_num} incorporating this feedback:\n\n"
         f"FEEDBACK: {feedback}\n\n"

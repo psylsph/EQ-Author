@@ -4,13 +4,13 @@ from typing import Dict
 
 STEP_FILENAMES: Dict[int, str] = {
     1: "01_brainstorm_and_reflection.md",
-    2: "02_intention_and_chapter_planning.md",
-    3: "03_human_vs_llm_critique.md",
-    4: "04_final_plan.md",
-    5: "05_characters.md",
+    2: "02_characters.md",
+    3: "03_intention_and_chapter_planning.md",
+    4: "04_human_vs_llm_critique.md",
+    5: "05_final_plan.md",
 }
 
-CHAPTER_WORD_TARGET = 2500
+CHAPTER_WORD_TARGET = 2000
 CHAPTER_MIN_WORDS = CHAPTER_WORD_TARGET
 CHAPTER_MAX_ATTEMPTS = 5
 

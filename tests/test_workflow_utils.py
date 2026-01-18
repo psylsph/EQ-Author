@@ -39,7 +39,7 @@ class TestBuildPrompts:
     def test_build_followup_prompts_contain_word_target(self):
         """Test that prompts contain word target."""
         prompts = build_followup_prompts(5)
-        assert "2500" in prompts[2]  # CHAPTER_WORD_TARGET
+        assert "2000" in prompts[2]  # CHAPTER_WORD_TARGET
 
 
 class TestEnsureOutputDir:
@@ -121,7 +121,7 @@ class TestChapterPrompt:
         """Test that prompt contains word count requirement."""
         for i in [1, 2, 5]:
             prompt = chapter_prompt(i)
-            assert "2500" in prompt  # CHAPTER_MIN_WORDS
+            assert "2000" in prompt  # CHAPTER_MIN_WORDS
 
     def test_chapter_prompt_prevents_overlap(self):
         """Test that later chapters include overlap prevention."""
